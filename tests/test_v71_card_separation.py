@@ -124,3 +124,94 @@ def test_카드행과_진짜부문행은_재태깅후_dedup키가_분리된다()
 
     assert len(cleaned["reduction_targets"]) == 2
     assert {row["목표수준"] for row in cleaned["reduction_targets"]} == {"세부사업", "부문"}
+
+
+def test_S3_같은값의_지역전체_총괄행은_관리권한행에_흡수하고_경고한다() -> None:
+    cleaned = _organize_targets([
+        _target_row(
+            목표수준="총괄",
+            목표범위="지역전체",
+            부문="합계",
+            기준연도=2018,
+            목표감축량=9_802,
+            출처페이지="6,200,251",
+        ),
+        _target_row(
+            목표수준="총괄",
+            목표범위="관리권한",
+            부문="전체",
+            기준연도=2005,
+            목표감축량=9_850,
+            목표배출량=19_778,
+            감축률=40,
+            출처페이지=185,
+        ),
+    ])
+
+    assert len(cleaned["reduction_targets"]) == 1
+    kept = cleaned["reduction_targets"][0]
+    assert kept["목표범위"] == "관리권한"
+    assert kept["기준연도"] == 2005
+    assert kept["목표감축량"] == 9_850.0
+    assert kept["출처페이지"] == "6,185,200,251"
+    assert any(
+        issue["심각도"] == "경고"
+        and issue["항목"].startswith("목표범위혼입의심")
+        and issue["대상시트키"] == "reduction_targets"
+        and issue["대상행번호"] == 1
+        for issue in cleaned["validation_report"]
+    )
+
+
+def test_S3_값이_다른_지역전체_총괄행은_보존한다() -> None:
+    cleaned = _organize_targets([
+        _target_row(
+            목표수준="총괄",
+            목표범위="지역전체",
+            부문="합계",
+            목표감축량=9_802,
+            출처페이지=6,
+        ),
+        _target_row(
+            목표수준="총괄",
+            목표범위="관리권한",
+            부문="합계",
+            목표감축량=10_000,
+            목표배출량=19_778,
+            출처페이지=185,
+        ),
+    ])
+
+    assert len(cleaned["reduction_targets"]) == 2
+    assert {row["목표범위"] for row in cleaned["reduction_targets"]} == {"지역전체", "관리권한"}
+    assert not any(
+        issue["항목"].startswith("목표범위혼입의심")
+        for issue in cleaned["validation_report"]
+    )
+
+
+def test_S3_관리권한행이_목표구조를_갖추지_않으면_흡수하지_않는다() -> None:
+    cleaned = _organize_targets([
+        _target_row(
+            목표수준="총괄",
+            목표범위="지역전체",
+            부문="",
+            목표감축량=9_802,
+            출처페이지=6,
+        ),
+        _target_row(
+            목표수준="총괄",
+            목표범위="관리권한",
+            부문="합계",
+            목표감축량=9_802,
+            목표배출량=None,
+            감축률=None,
+            출처페이지=185,
+        ),
+    ])
+
+    assert len(cleaned["reduction_targets"]) == 2
+    assert not any(
+        issue["항목"].startswith("목표범위혼입의심")
+        for issue in cleaned["validation_report"]
+    )
