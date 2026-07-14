@@ -1,6 +1,7 @@
 """v7-1 06_감축목표 연차경로·사업카드 키 분리 회귀 테스트."""
 
 from agents.organizer_agent import OrganizerAgent
+from utils.reference_data import build_codebook_rows
 
 
 def _target_row(**overrides) -> dict:
@@ -214,4 +215,18 @@ def test_S3_관리권한행이_목표구조를_갖추지_않으면_흡수하지_
     assert not any(
         issue["항목"].startswith("목표범위혼입의심")
         for issue in cleaned["validation_report"]
+    )
+
+
+def test_S4_코드북에_목표수준_코드체계를_정의한다() -> None:
+    target_level_rows = {
+        row["코드"]: row
+        for row in build_codebook_rows()
+        if row["코드유형"] == "목표수준"
+    }
+
+    assert set(target_level_rows) == {"총괄", "부문", "세부부문", "세부사업", "연차경로"}
+    assert target_level_rows["세부사업"]["정의"] == "개별 사업 카드의 감축 목표"
+    assert target_level_rows["연차경로"]["정의"] == (
+        "연차별 감축 경로표에서 유래한 행 — 목표연도 시점의 목표가 아님"
     )
