@@ -26,7 +26,7 @@ def _organize_targets(rows: list[dict], **other_raw) -> dict:
     })
 
 
-def test_S1_사업문맥페이지에만_있는_부문행을_세부사업으로_재태깅한다() -> None:
+def test_S1_사업문맥페이지에만_있는_부문행을_세부사업으로_재태깅한다(capsys) -> None:
     cleaned = _organize_targets(
         [
             _target_row(출처페이지="10,11"),
@@ -42,6 +42,7 @@ def test_S1_사업문맥페이지에만_있는_부문행을_세부사업으로_�
         issue["심각도"] == "정보" and "사업문맥페이지" in issue["문제내용"]
         for issue in cleaned["validation_report"]
     )
+    assert "06_감축목표 재태깅 1건" in capsys.readouterr().out
 
 
 def test_S1_출처페이지일부만_사업문맥이면_목표장행을_보존한다() -> None:

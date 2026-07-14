@@ -485,8 +485,7 @@ def _retag_reduction_target_rows(
             "원문 표가 사업 카드 또는 연차별 감축 경로인지 확인",
             target_sheet_key="reduction_targets",
         )
-    if retagged_count:
-        logger.info("[에이전트3 정리] 06_감축목표 재태깅 %d건", retagged_count)
+    print(f"[에이전트3 정리] 06_감축목표 재태깅 {retagged_count}건")
     return rows
 
 
