@@ -388,6 +388,108 @@ def _row_source_pages(row: dict) -> set[int]:
     return {int(part) for part in normalized.split(",") if part.isdigit()}
 
 
+def _raw_row_source_pages(row: dict) -> set[int]:
+    normalized = _normalize_provenance_pages([
+        row.get("출처페이지"),
+        row.get("출처페이지추정"),
+    ])
+    if not normalized:
+        return set()
+    return {int(part) for part in normalized.split(",") if part.isdigit()}
+
+
+def _card_context_pages(raw_data: dict) -> set[int]:
+    pages: set[int] = set()
+    for sheet_key in ("mitigation_projects", "annual_implementation", "quantitative_reductions"):
+        rows = raw_data.get(sheet_key, [])
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if isinstance(row, dict):
+                pages.update(_raw_row_source_pages(row))
+    return pages
+
+
+def _years_in_consecutive_runs(years: set[int], minimum_length: int = 4) -> set[int]:
+    qualifying: set[int] = set()
+    run: list[int] = []
+    for year in sorted(years):
+        if run and year != run[-1] + 1:
+            if len(run) >= minimum_length:
+                qualifying.update(run)
+            run = []
+        run.append(year)
+    if len(run) >= minimum_length:
+        qualifying.update(run)
+    return qualifying
+
+
+def _retag_reduction_target_rows(
+    rows: list[dict],
+    municipality: str,
+    card_pages: set[int],
+) -> list[dict]:
+    """06 원행을 dedup 전에 사업카드·연차경로 키로 분리한다."""
+    for row in rows:
+        pages = _raw_row_source_pages(row)
+        target_level = str(row.get("목표수준", "") or "").strip()
+        if pages and pages.issubset(card_pages) and target_level in {"총괄", "부문"}:
+            row.setdefault("_재태깅이전목표수준", target_level)
+            row["목표수준"] = "세부사업"
+            row["_재태깅사유"] = "사업문맥페이지"
+
+    groups: dict[tuple[str, str, str, str], list[tuple[dict, int]]] = {}
+    for row in rows:
+        year = _to_int(row.get("목표연도"))
+        if year is None:
+            continue
+        page_key = _normalize_provenance_pages([
+            row.get("출처페이지"),
+            row.get("출처페이지추정"),
+        ])
+        key = (
+            page_key,
+            _dedup_key_text(row.get("목표수준")),
+            _dedup_key_text(row.get("목표범위")),
+            _dedup_key_text(row.get("부문")),
+        )
+        groups.setdefault(key, []).append((row, year))
+
+    for group_rows in groups.values():
+        run_years = _years_in_consecutive_runs({year for _row, year in group_rows})
+        if not run_years:
+            continue
+        for row, year in group_rows:
+            if year not in run_years:
+                continue
+            row.setdefault("_재태깅이전목표수준", row.get("목표수준"))
+            row["목표수준"] = "연차경로"
+            row["_재태깅사유"] = "연차시퀀스"
+
+    retagged_count = 0
+    for index, row in enumerate(rows, start=1):
+        reason = str(row.get("_재태깅사유", "") or "").strip()
+        if not reason:
+            continue
+        retagged_count += 1
+        pages = _normalize_provenance_pages([
+            row.get("출처페이지"),
+            row.get("출처페이지추정"),
+        ]) or "미상"
+        _remember_validation_issue(
+            municipality,
+            "정보",
+            _sheet_area("reduction_targets"),
+            f"목표수준 재태깅(06 원행 {index})",
+            f"출처페이지 {pages}; {row.get('_재태깅이전목표수준') or '빈 값'}→{row.get('목표수준')}; 사유 {reason}",
+            "원문 표가 사업 카드 또는 연차별 감축 경로인지 확인",
+            target_sheet_key="reduction_targets",
+        )
+    if retagged_count:
+        logger.info("[에이전트3 정리] 06_감축목표 재태깅 %d건", retagged_count)
+    return rows
+
+
 def _dedup_key_text(val: Any) -> str:
     """dedup 키 생성 전용 텍스트 정규화. 원본 셀 값은 바꾸지 않는다."""
     return normalise_key_text(val).replace(" ", "")
@@ -2044,12 +2146,15 @@ class OrganizerAgent:
         _RECORDED_VALIDATION_ISSUES.clear()
         raw_counts: dict[str, int] = {}
         cleaned: dict = {"municipality_name": municipality}
+        card_pages = _card_context_pages(raw_data)
         for sheet_key, cleaner in _CLEANERS.items():
             rows = raw_data.get(sheet_key, [])
             if not isinstance(rows, list):
                 rows = []
             rows = [dict(r) for r in rows if isinstance(r, dict)]
             raw_counts[sheet_key] = len(rows)
+            if sheet_key == "reduction_targets":
+                rows = _retag_reduction_target_rows(rows, municipality, card_pages)
             cleaned_rows = cleaner(rows, municipality)
             cleaned[sheet_key] = [_normalize_row_provenance(row) for row in cleaned_rows]
 

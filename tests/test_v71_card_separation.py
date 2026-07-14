@@ -1,0 +1,126 @@
+"""v7-1 06_감축목표 연차경로·사업카드 키 분리 회귀 테스트."""
+
+from agents.organizer_agent import OrganizerAgent
+
+
+def _target_row(**overrides) -> dict:
+    row = {
+        "목표수준": "부문",
+        "목표범위": "관리권한",
+        "부문": "건물",
+        "기준연도": 2018,
+        "목표연도": 2030,
+        "목표감축량": 100,
+        "출처페이지": 10,
+    }
+    row.update(overrides)
+    return row
+
+
+def _organize_targets(rows: list[dict], **other_raw) -> dict:
+    return OrganizerAgent().organize({
+        "municipality_name": "테스트시",
+        "reduction_targets": rows,
+        **other_raw,
+    })
+
+
+def test_S1_사업문맥페이지에만_있는_부문행을_세부사업으로_재태깅한다() -> None:
+    cleaned = _organize_targets(
+        [
+            _target_row(출처페이지="10,11"),
+            _target_row(출처페이지=99, 목표감축량=200),
+        ],
+        mitigation_projects=[{"사업명": "고효율 건물 사업", "출처페이지": 10}],
+        annual_implementation=[{"사업명": "고효율 건물 사업", "연도": 2030, "출처페이지추정": 11}],
+    )
+
+    assert [row["목표수준"] for row in cleaned["reduction_targets"]] == ["세부사업", "부문"]
+    assert cleaned["reduction_targets"][0]["_재태깅사유"] == "사업문맥페이지"
+    assert any(
+        issue["심각도"] == "정보" and "사업문맥페이지" in issue["문제내용"]
+        for issue in cleaned["validation_report"]
+    )
+
+
+def test_S1_출처페이지일부만_사업문맥이면_목표장행을_보존한다() -> None:
+    cleaned = _organize_targets(
+        [_target_row(출처페이지="10,99")],
+        quantitative_reductions=[{"사업명": "고효율 건물 사업", "출처페이지": 10}],
+    )
+
+    assert cleaned["reduction_targets"][0]["목표수준"] == "부문"
+    assert "_재태깅사유" not in cleaned["reduction_targets"][0]
+
+
+def test_S1_교차시트신호가_없는_폐루프_정리는_noop이다() -> None:
+    cleaned = OrganizerAgent().organize_sheet(
+        "reduction_targets",
+        [_target_row(출처페이지=10)],
+        "테스트시",
+    )
+
+    assert cleaned[0]["목표수준"] == "부문"
+    assert "_재태깅사유" not in cleaned[0]
+
+
+def test_S2_연속4연도는_이정표연도를_포함해_연차경로로_재태깅한다() -> None:
+    cleaned = _organize_targets([
+        _target_row(목표연도=year, 목표감축량=year - 2000, 출처페이지=20)
+        for year in (2029, 2030, 2031, 2032)
+    ])
+
+    assert {row["목표수준"] for row in cleaned["reduction_targets"]} == {"연차경로"}
+    assert {row["목표연도"] for row in cleaned["reduction_targets"]} == {2029, 2030, 2031, 2032}
+    assert all(row["_재태깅사유"] == "연차시퀀스" for row in cleaned["reduction_targets"])
+    assert sum("연차시퀀스" in issue["문제내용"] for issue in cleaned["validation_report"]) == 4
+
+
+def test_S2_5년간격_이정표표는_기존_목표수준을_보존한다() -> None:
+    cleaned = _organize_targets([
+        _target_row(목표연도=year, 목표감축량=year - 2000, 출처페이지=20)
+        for year in (2030, 2035, 2040, 2045)
+    ])
+
+    assert {row["목표수준"] for row in cleaned["reduction_targets"]} == {"부문"}
+
+
+def test_S2_연속구간길이3이하는_기존_목표수준을_보존한다() -> None:
+    cleaned = _organize_targets([
+        _target_row(목표연도=year, 목표감축량=year - 2000, 출처페이지=20)
+        for year in (2029, 2030, 2031)
+    ])
+
+    assert {row["목표수준"] for row in cleaned["reduction_targets"]} == {"부문"}
+
+
+def test_S2는_S1보다_우선하고_최종_검증사유도_연차시퀀스다() -> None:
+    cleaned = _organize_targets(
+        [
+            _target_row(목표연도=year, 목표감축량=year - 2000, 출처페이지=20)
+            for year in (2029, 2030, 2031, 2032)
+        ],
+        mitigation_projects=[{"사업명": "연차 전개 사업", "출처페이지": 20}],
+    )
+
+    assert {row["목표수준"] for row in cleaned["reduction_targets"]} == {"연차경로"}
+    retag_issues = [
+        issue for issue in cleaned["validation_report"]
+        if issue["항목"].startswith("목표수준 재태깅")
+    ]
+    assert len(retag_issues) == 4
+    assert all("연차시퀀스" in issue["문제내용"] for issue in retag_issues)
+    assert all("사업문맥페이지" not in issue["문제내용"] for issue in retag_issues)
+
+
+def test_카드행과_진짜부문행은_재태깅후_dedup키가_분리된다() -> None:
+    cleaned = _organize_targets(
+        [
+            _target_row(출처페이지=10, 목표감축량=86_200),
+            _target_row(출처페이지=99, 목표감축량=9_877),
+        ],
+        mitigation_projects=[{"사업명": "카드 사업", "출처페이지": 10}],
+    )
+
+    assert len(cleaned["reduction_targets"]) == 2
+    assert {row["목표수준"] for row in cleaned["reduction_targets"]} == {"세부사업", "부문"}
