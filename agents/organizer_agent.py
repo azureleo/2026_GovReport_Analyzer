@@ -494,6 +494,20 @@ def _dedup_key_text(val: Any) -> str:
     return normalise_key_text(val).replace(" ", "")
 
 
+def _reduction_target_project_hint_key(row: dict) -> str:
+    if _dedup_key_text(row.get("목표수준")) != "세부사업":
+        return ""
+    return _dedup_key_text(row.get("_사업명힌트"))
+
+
+def _dedup_key(row: dict, key_fields: list[str]) -> tuple:
+    key = tuple(_dedup_key_text(row.get(field)) for field in key_fields)
+    if tuple(key_fields) != tuple(_REDUCTION_TARGET_KEY_FIELDS):
+        return key
+    project_hint = _reduction_target_project_hint_key(row)
+    return (*key, project_hint) if project_hint else key
+
+
 def _visual_key_text(val: Any) -> str:
     """시각 병합 키에서만 밑줄과 공백 표기를 같은 값으로 접는다."""
     return _dedup_key_text(val).replace("_", "")
@@ -879,10 +893,15 @@ def _strip_dedup_internal_fields(rows: list[dict]) -> list[dict]:
 
 
 def _same_except_field(left: dict, right: dict, key_fields: list[str], blank_field: str) -> bool:
-    return all(
+    same_base_key = all(
         field == blank_field or _dedup_key_text(left.get(field)) == _dedup_key_text(right.get(field))
         for field in key_fields
     )
+    if not same_base_key:
+        return False
+    if tuple(key_fields) != tuple(_REDUCTION_TARGET_KEY_FIELDS):
+        return True
+    return _reduction_target_project_hint_key(left) == _reduction_target_project_hint_key(right)
 
 
 def _absorb_blank_field_rows(rows: list[dict], key_fields: list[str], blank_field: str) -> list[dict]:
@@ -926,7 +945,7 @@ def _deduplicate_rows(rows: list[dict], key_fields: list[str]) -> list[dict]:
         row = _normalize_row_provenance(dict(source_row))
         row[_DEDUP_TABLE_MARKER_FIELD] = _source_has_table_marker(source_row)
         _apply_row_data_status(row)
-        key = tuple(_dedup_key_text(row.get(f)) for f in key_fields)
+        key = _dedup_key(row, key_fields)
         if key not in seen:
             seen[key] = row
             continue
@@ -1048,6 +1067,10 @@ def _clean_emissions_forecast(rows: list[dict], municipality: str) -> list[dict]
 
 def _clean_reduction_targets(rows: list[dict], municipality: str) -> list[dict]:
     for row in rows:
+        if "사업명힌트" in row:
+            project_hint = row.pop("사업명힌트")
+            if _has_cell_value(project_hint):
+                row["_사업명힌트"] = str(project_hint).strip()
         row["지자체명"] = row.get("지자체명") or municipality
         row["부문"] = _normalise_sector_with_raw(row, "부문", "부문원문")
         row["기준연도"] = _to_int(row.get("기준연도"))
