@@ -57,6 +57,24 @@ def _세부부문완화후보허용(sheet_name: str, golden_row: Any, output_row
     )
 
 
+def _감축목표완화후보허용(sheet_name: str, golden_row: Any, output_row: Any) -> bool:
+    if sheet_name != "06_감축목표":
+        return True
+    golden_level = dedup_key_text(golden_row.값.get("목표수준"))
+    output_level = dedup_key_text(output_row.값.get("목표수준"))
+    if not golden_level or not output_level or golden_level == output_level:
+        return True
+    common_fields = [
+        field_name
+        for field_name in ("목표감축량", "목표배출량", "감축률(%)", "기준배출량", "배출전망")
+        if 값있음(golden_row.값.get(field_name)) and 값있음(output_row.값.get(field_name))
+    ]
+    return bool(common_fields) and all(
+        _상대오차일치(golden_row.값.get(field_name), output_row.값.get(field_name))
+        for field_name in common_fields
+    )
+
+
 def _지표토큰(row: Any) -> set[str]:
     text = f"{row.값.get('지표명') or ''} {row.값.get('지표세부범주') or ''}"
     parts = re.sub(r"[^\w]+", " ", text, flags=re.UNICODE).split()
@@ -235,6 +253,8 @@ def 매칭하기(
                 if output_idx not in remaining_output:
                     continue
                 if relaxed and not _세부부문완화후보허용(sheet_name, golden_row, candidate):
+                    continue
+                if relaxed and not _감축목표완화후보허용(sheet_name, golden_row, candidate):
                     continue
                 matches.append(매칭(golden_row, candidate, label, row_key))
                 remaining_golden.remove(golden_idx)
