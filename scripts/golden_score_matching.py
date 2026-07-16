@@ -62,7 +62,13 @@ def _감축목표완화후보허용(sheet_name: str, golden_row: Any, output_row
         return True
     golden_level = dedup_key_text(golden_row.값.get("목표수준"))
     output_level = dedup_key_text(output_row.값.get("목표수준"))
-    if not golden_level or not output_level or golden_level == output_level:
+    golden_base_year = 키값("기준연도", golden_row.값.get("기준연도"))
+    output_base_year = 키값("기준연도", output_row.값.get("기준연도"))
+    level_diverged = bool(golden_level and output_level and golden_level != output_level)
+    base_year_diverged = bool(
+        golden_base_year and output_base_year and golden_base_year != output_base_year
+    )
+    if not level_diverged and not base_year_diverged:
         return True
     common_fields = [
         field_name
