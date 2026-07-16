@@ -117,6 +117,14 @@ GEMINI_VISION_MODEL = os.environ.get("GEMINI_VISION_MODEL", "gemini-2.5-pro").st
 # 명시 지정한다. 채택 승인 2026-07-10.
 # 우선순위: STAGE_MODEL_VISION > CODEX_VISION_MODEL. 빈 값이면 CLI 기본 모델.
 CODEX_VISION_MODEL = os.environ.get("CODEX_VISION_MODEL", "gpt-5.6-luna").strip()
+
+# 에이전트(codex) 모드 텍스트(비전 외) 기본 모델.
+# v7-3 실측(서울 골든 3,520행: 텍스트 리콜 0.8447·값일치 0.9280 — flash-lite
+# 하한선 0.6101/0.8864 대비)으로 채택. --agent codex로 실행하면 모델 미지정 시
+# 이 값이 쓰여 luna73 캐시와 키가 정합한다.
+# 우선순위: STAGE_MODEL_* > LOCAL_AGENT_MODEL(--agent-model) > CODEX_TEXT_MODEL.
+# 빈 값이면 CLI 기본 모델.
+CODEX_TEXT_MODEL = os.environ.get("CODEX_TEXT_MODEL", "gpt-5.6-luna").strip()
 MAX_TOKENS = 65536  # Gemini 백엔드 사용 시 최대 출력 토큰
 
 # Gemini 503/일시 과부하 대응 설정.

@@ -282,13 +282,17 @@ def _codex_default_model(stage: str | None) -> str:
 
     캐시 키(_model_identity)와 실제 --model 인자가 항상 같은 값을 쓰도록, codex 기본
     모델 결정은 이 함수만 거친다. vision 단계의 gpt-5.6-luna 기본값 근거는
-    config.CODEX_VISION_MODEL 주석 참조.
+    config.CODEX_VISION_MODEL 주석, 텍스트 단계는 config.CODEX_TEXT_MODEL 주석 참조.
     """
     if stage == "vision":
         vision_model = str(getattr(config, "CODEX_VISION_MODEL", "") or "").strip()
         if vision_model:
             return vision_model
-    return str(getattr(config, "LOCAL_AGENT_MODEL", "") or "")
+        return str(getattr(config, "LOCAL_AGENT_MODEL", "") or "")
+    explicit_model = str(getattr(config, "LOCAL_AGENT_MODEL", "") or "").strip()
+    if explicit_model:
+        return explicit_model
+    return str(getattr(config, "CODEX_TEXT_MODEL", "") or "")
 
 
 def _model_identity(provider: str, stage: str | None = None) -> str:
