@@ -1629,6 +1629,8 @@ def _apply_visual_labeled_merge(cleaned: dict, observations: list[dict], municip
             blockers.append(f"G2 신뢰도 기준 미달({observation.get('신뢰도') or ''} < {min_confidence})")
         if _is_reference_visual_observation(observation):
             blockers.append("G4 참고자료/사례 판정")
+        if str(observation.get("종류추론", "") or "").strip() == "목표":
+            blockers.append("G4 종류=목표 — 감축 경로표 값")
 
         candidate = None
         key_fields = _VISUAL_MERGE_KEY_FIELDS.get(sheet_key)

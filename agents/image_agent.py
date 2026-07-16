@@ -727,6 +727,7 @@ fields의 시트별 필수 분류 필드는 이미지에서 확신할 때만 넣
         merged: bool,
         confidence: str | None = None,
         reasons: list[str] | None = None,
+        inferred_kind: str | None = None,
     ):
         fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
         reason_text = "; ".join(reasons or [])
@@ -748,6 +749,8 @@ fields의 시트별 필수 분류 필드는 이미지에서 확신할 때만 넣
         }
         if analysis.get("target_sheet") == "summary":
             evidence["대상시트근거"] = "재추론(summary)"
+        if inferred_kind in {"현황", "전망", "목표"}:
+            evidence["종류추론"] = inferred_kind
         text_results.setdefault("chart_observations", []).append(evidence)
 
     def _merge_image_results(self, text_results: dict, analyses: list[dict], municipality: str) -> dict:
@@ -790,7 +793,7 @@ fields의 시트별 필수 분류 필드는 이미지에서 확신할 때만 넣
                     auto_merge = can_merge and target_sheet != "reduction_targets"
                     self._append_chart_observation(
                         text_results, analysis, item, target_sheet,
-                        auto_merge, final_confidence, merge_reasons
+                        auto_merge, final_confidence, merge_reasons, default_chart_kind
                     )
 
                     if not auto_merge:
