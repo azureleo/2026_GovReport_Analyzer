@@ -768,6 +768,7 @@ fields의 시트별 필수 분류 필드는 이미지에서 확신할 때만 넣
                     fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
                     merged_item = {**fields, **item}
                     can_merge, final_confidence, merge_reasons = self._chart_merge_decision(analysis, item, target_sheet)
+                    default_chart_kind = None
                     if can_merge and target_sheet in {"emissions_regional", "emissions_management"}:
                         if target_sheet == "emissions_regional":
                             sector = merged_item.get("부문") or merged_item.get("항목")
@@ -781,6 +782,11 @@ fields의 시트별 필수 분류 필드는 이미지에서 확신할 때만 넣
                         if _gas_sector_key(sector) in gas_sector_keys:
                             can_merge = False
                             merge_reasons = [*merge_reasons, "G3 부문에 가스종(스키마 불일치)"]
+                    if target_sheet in {"emissions_regional", "emissions_management", "emissions_forecast"}:
+                        default_chart_kind = _infer_chart_kind(item, analysis)
+                        if default_chart_kind == "목표":
+                            can_merge = False
+                            merge_reasons = [*merge_reasons, "종류=목표 — 06 시각 차단 정책"]
                     auto_merge = can_merge and target_sheet != "reduction_targets"
                     self._append_chart_observation(
                         text_results, analysis, item, target_sheet,
@@ -864,7 +870,7 @@ fields의 시트별 필수 분류 필드는 이미지에서 확신할 때만 넣
                     if numeric is None:
                         continue
 
-                    kind = _infer_chart_kind(item, analysis)
+                    kind = default_chart_kind or _infer_chart_kind(item, analysis)
                     # 차트가 배출유형을 명시했으면 존중하고, 없으면 None으로 둔다(현황은 직접배출 기본).
                     emit_type = item.get("배출유형")
                     if emit_type not in ("직접배출", "간접배출", "흡수원"):
@@ -885,21 +891,7 @@ fields의 시트별 필수 분류 필드는 이미지에서 확신할 때만 넣
                             "출처페이지": analysis.get("page_number"),
                         })
                     elif kind == "목표":
-                        existing_targets.append({
-                            "지자체명": municipality,
-                            "목표수준": "총괄" if label in ("합계", "총괄", "전체") else "부문",
-                            "목표범위": "지역전체",
-                            "부문": label,
-                            "기준연도": None,
-                            "기준배출량": None,
-                            "목표연도": year_int,
-                            "배출전망": None,
-                            "목표감축량": None,
-                            "목표배출량": numeric,
-                            "감축률": None,
-                            "출처페이지": analysis.get("page_number"),
-                            "데이터상태": "visual_only",
-                        })
+                        continue
                     else:
                         existing_ghg.append({
                             "지자체명": municipality,

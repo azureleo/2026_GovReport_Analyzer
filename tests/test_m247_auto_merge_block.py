@@ -85,6 +85,40 @@ def test_target_chart_rows는_자동_반영하지_않고_검토_관찰값으로_
     assert merged["chart_observations"][0]["반영여부"] == "검토"
 
 
+def test_기본_종류분기의_목표는_06에_병합하지_않고_차단_관찰값으로_남긴다() -> None:
+    analysis = _chart_analysis("ghg", {"부문": "건물", "연도": 2030})
+    analysis["table"][0]["종류"] = "목표"
+
+    merged = ImageAgent()._merge_image_results({}, [analysis], "가상시")
+
+    assert merged["reduction_targets"] == []
+    assert merged["emissions_regional"] == []
+    assert merged["chart_observations"][0]["반영여부"] == "검토"
+    assert "종류=목표 — 06 시각 차단 정책" in merged["chart_observations"][0]["근거"]
+
+
+def test_기본_종류분기의_전망은_기존대로_05에_자동_반영한다() -> None:
+    analysis = _chart_analysis("ghg", {"부문": "건물", "연도": 2030})
+    analysis["table"][0]["종류"] = "전망"
+
+    merged = ImageAgent()._merge_image_results({}, [analysis], "가상시")
+
+    assert len(merged["emissions_forecast"]) == 1
+    assert merged["emissions_forecast"][0]["전망값"] == 100.0
+    assert merged["chart_observations"][0]["반영여부"] == "반영"
+
+
+def test_기본_종류분기의_현황은_기존대로_03에_자동_반영한다() -> None:
+    analysis = _chart_analysis("ghg", {"부문": "건물", "연도": 2030})
+    analysis["table"][0]["종류"] = "현황"
+
+    merged = ImageAgent()._merge_image_results({}, [analysis], "가상시")
+
+    assert len(merged["emissions_regional"]) == 1
+    assert merged["emissions_regional"][0]["배출량"] == 100.0
+    assert merged["chart_observations"][0]["반영여부"] == "반영"
+
+
 def test_regional_conditions_chart_rows는_기존대로_자동_반영한다() -> None:
     analysis = _chart_analysis(
         "regional_conditions",
