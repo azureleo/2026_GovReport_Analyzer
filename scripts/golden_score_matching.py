@@ -270,7 +270,7 @@ def _문자유사매칭하기(
 
 
 def 매칭하기(
-    golden_rows: list, output_rows: list, sheet_name: str
+    golden_rows: list, output_rows: list, sheet_name: str, 보수티어만: bool = False
 ) -> tuple[list[매칭], set[int], set[int], list[매칭], list[매칭], list[매칭]]:
     matches: list[매칭] = []
     remaining_golden = set(range(len(golden_rows)))
@@ -299,7 +299,7 @@ def 매칭하기(
     의미완화매칭들 = []
     문자유사매칭들 = []
     문자유사관찰들 = []
-    if sheet_name in 의미완화적용시트:
+    if not 보수티어만 and sheet_name in 의미완화적용시트:
         의미완화매칭들 = _의미완화매칭하기(
             golden_rows, output_rows, remaining_golden, remaining_output, sheet_name
         )

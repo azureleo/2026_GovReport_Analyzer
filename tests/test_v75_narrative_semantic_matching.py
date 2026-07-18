@@ -223,3 +223,61 @@ def test_문자유사_티어는_서술형_시트에서_호출하지_않는다(
     monkeypatch.setattr(golden_score_matching, "_문자유사매칭하기", fail_if_called)
 
     golden_score_matching.매칭하기([행(2, {})], [행(2, {})], sheet_name)
+
+
+def test_매칭하기_기본인자는_명시적_false와_동일하다() -> None:
+    golden = 행(
+        2,
+        {
+            "개요유형": "목적",
+            "항목명": "계획 수립 목적",
+            "항목값": "탄소중립 계획",
+        },
+    )
+    output = 행(
+        2,
+        {
+            "개요유형": "목적",
+            "항목명": "계획 수립 목적 및 배경",
+            "항목값": "탄소중립 계획",
+        },
+    )
+
+    default_result = golden_score_matching.매칭하기(
+        [golden], [output], "01_계획개요"
+    )
+    explicit_result = golden_score_matching.매칭하기(
+        [golden], [output], "01_계획개요", 보수티어만=False
+    )
+
+    assert default_result == explicit_result
+    assert len(default_result[3]) == 1
+
+
+def test_보수티어만이면_의미완화와_문자유사를_호출하지_않는다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("보수 티어 경로에서 후속 유사도 티어를 호출했다")
+
+    monkeypatch.setattr(golden_score_matching, "_의미완화매칭하기", fail_if_called)
+    monkeypatch.setattr(golden_score_matching, "_문자유사매칭하기", fail_if_called)
+    golden = 행(
+        2,
+        {"지표범주": "인구", "지표명": "인구 수", "연도": 2020, "값": 10},
+    )
+    output = 행(
+        2,
+        {"지표범주": "인구", "지표명": "인구 규모", "연도": 2020, "값": 10},
+    )
+
+    matches, _, _, semantic, character, observations = (
+        golden_score_matching.매칭하기(
+            [golden], [output], "02_지역여건", 보수티어만=True
+        )
+    )
+
+    assert matches == []
+    assert semantic == []
+    assert character == []
+    assert observations == []
