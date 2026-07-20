@@ -94,6 +94,16 @@ _FORECAST_METHOD_MAP = {
     "ENPEP": "bottom_up_simulation_ENPEP",
 }
 
+_FORECAST_SCENARIO_MAP = {
+    "추가조치": "추가조치", "추가 조치": "추가조치",
+    "추가대책": "추가조치", "추가 대책": "추가조치",
+    "BAU 대비": "정책반영", "BAU대비": "정책반영",
+    "정책반영": "정책반영", "정책 반영": "정책반영",
+    "현행추세": "BAU", "현행 추세": "BAU",
+    "감축": "정책반영", "목표": "정책반영", "정책": "정책반영",
+    "전망": "BAU", "BAU": "BAU",
+}
+
 _MANAGEMENT_ENERGY_SOURCE_TERMS = {"전력", "열", "에너지"}
 _GUIDELINE_INVENTORY_SECTORS = (
     "에너지",
@@ -1052,6 +1062,17 @@ def _clean_emissions_management(rows: list[dict], municipality: str) -> list[dic
 def _clean_emissions_forecast(rows: list[dict], municipality: str) -> list[dict]:
     for row in rows:
         row["지자체명"] = row.get("지자체명") or municipality
+        scenario_raw = str(row.get("시나리오", "") or "").strip()
+        normalized_scenario = scenario_raw
+        for keyword, scenario in sorted(
+            _FORECAST_SCENARIO_MAP.items(), key=lambda item: len(item[0]), reverse=True
+        ):
+            if keyword.casefold() in scenario_raw.casefold():
+                normalized_scenario = scenario
+                break
+        row["시나리오"] = normalized_scenario
+        if normalized_scenario != scenario_raw and not _has_cell_value(row.get("전망방법원문")):
+            row["전망방법원문"] = scenario_raw
         row["연도"] = _to_int(row.get("연도"))
         row["전망값"] = _to_float(row.get("전망값"))
         row["단위"] = _normalize_co2_unit(row.get("단위", ""))
