@@ -55,6 +55,7 @@ _감사접두 = {
     "원장": ("원장",),
     "빈 시트": ("빈 시트",),
 }
+_옵셔널키필드 = ("세부부문", "지표세부범주")
 
 
 class 프로브형식오류(ValueError):
@@ -223,10 +224,31 @@ def _L2(
     code_sets: dict[str, set[str]],
 ) -> dict[str, Any]:
     rows = sheet["행들"]
-    filled = sum(키(row, sheet_name, False) is not None for row in rows)
+    required_filled = 0
+    for row in rows:
+        values = dict(row.값)
+        for field_name in _옵셔널키필드:
+            if not 값있음(values.get(field_name)):
+                values[field_name] = "__옵셔널필드__"
+        required_filled += 키(행(row.번호, values), sheet_name, False) is not None
+    optional_fields = [
+        field_name for field_name in _옵셔널키필드 if field_name in sheet["헤더"]
+    ]
+    optional_total = len(rows) * len(optional_fields)
+    optional_filled = sum(
+        값있음(row.값.get(field_name))
+        for row in rows
+        for field_name in optional_fields
+    )
     return {
-        "일차키채움수": filled,
-        "일차키채움률": _비율(filled, len(rows)),
+        "일차키채움수": required_filled,
+        "일차키채움률": _비율(required_filled, len(rows)),
+        "옵셔널필드": {
+            "대상필드": optional_fields,
+            "채움수": optional_filled,
+            "전체수": optional_total,
+            "채움률": _비율(optional_filled, optional_total),
+        },
         "표준코드": _코드매핑(rows, sheet["헤더"], code_sets),
         "연도": _연도정합(rows, sheet["헤더"], band),
     }
@@ -448,8 +470,8 @@ def _마크다운(result: dict[str, Any]) -> str:
         "- LLM 호출: 0\n",
         "- 임계 합격/불합격 판정: 없음\n\n",
         "## 시트별 지표\n\n",
-        "| 시트 | A행 | B행 | 키합의율 | 값합의율 | A단독 | B단독 | L1 A밀도 | L1 B밀도 | A키채움률 | B키채움률 | A코드매핑률 | B코드매핑률 | A연도정합률 | B연도정합률 |\n",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+        "| 시트 | A행 | B행 | 키합의율 | 값합의율 | A단독 | B단독 | L1 A밀도 | L1 B밀도 | A키채움률 | B키채움률 | A옵셔널채움률 | B옵셔널채움률 | A코드매핑률 | B코드매핑률 | A연도정합률 | B연도정합률 |\n",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
     ]
     for sheet_name, sheet in result["시트별"].items():
         values = [
@@ -464,6 +486,8 @@ def _마크다운(result: dict[str, Any]) -> str:
             sheet["L1"]["B"]["밀도"],
             sheet["L2"]["A"]["일차키채움률"],
             sheet["L2"]["B"]["일차키채움률"],
+            sheet["L2"]["A"]["옵셔널필드"]["채움률"],
+            sheet["L2"]["B"]["옵셔널필드"]["채움률"],
             sheet["L2"]["A"]["표준코드"]["매핑률"],
             sheet["L2"]["B"]["표준코드"]["매핑률"],
             sheet["L2"]["A"]["연도"]["정합률"],

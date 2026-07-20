@@ -72,7 +72,14 @@ def test_L3_L2_L1과_md_json을_결정론적으로_생성한다(tmp_path: Path) 
     assert sheet["B단독행수"] == 1
     assert sheet["L1"]["A"]["밀도"] == 0.5
     assert sheet["L1"]["B"]["밀도"] == 0.0
-    assert sheet["L2"]["A"]["일차키채움률"] == 0.75
+    assert sheet["L2"]["A"]["일차키채움률"] == 1.0
+    assert sheet["L2"]["A"]["옵셔널필드"] == {
+        "대상필드": ["세부부문"],
+        "채움수": 3,
+        "전체수": 4,
+        "채움률": 0.75,
+    }
+    assert sheet["L2"]["B"]["옵셔널필드"]["채움률"] == 1.0
     assert sheet["L2"]["A"]["표준코드"]["매핑률"] == 0.75
     assert sheet["L2"]["B"]["표준코드"]["매핑률"] == 1.0
     assert sheet["L2"]["A"]["연도"]["정합률"] == 0.75
@@ -92,9 +99,35 @@ def test_L3_L2_L1과_md_json을_결정론적으로_생성한다(tmp_path: Path) 
     assert md_path.exists()
     assert json_path.exists()
     assert "# 무골든 교차 백엔드 품질 리포트 (A_vs_B)" in md_path.read_text(encoding="utf-8")
+    assert "A옵셔널채움률 | B옵셔널채움률" in md_path.read_text(encoding="utf-8")
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     assert payload["시트별"]["03_배출현황_지역"]["값합의율"] == 0.5
+    assert payload["시트별"]["03_배출현황_지역"]["L2"]["A"]["옵셔널필드"]["채움률"] == 0.75
     assert payload["LLM호출수"] == 0
+
+
+def test_L2는_지표세부범주를_필수키에서_제외하고_별도_채움률로_병기한다(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        {"지표범주": "자연환경", "지표세부범주": "", "지표명": "평균기온", "연도": 2020, "값": 13},
+        {"지표범주": "인문사회", "지표세부범주": "인구", "지표명": "총인구", "연도": 2020, "값": 100},
+    ]
+    a = _워크북(tmp_path / "A.xlsx", {"02_지역여건": rows})
+    b = _워크북(tmp_path / "B.xlsx", {"02_지역여건": rows})
+
+    result = cross_backend_probe.probe_workbooks(
+        a, b, report_dir=tmp_path / "report"
+    )
+
+    l2 = result["시트별"]["02_지역여건"]["L2"]["A"]
+    assert l2["일차키채움률"] == 1.0
+    assert l2["옵셔널필드"] == {
+        "대상필드": ["지표세부범주"],
+        "채움수": 1,
+        "전체수": 2,
+        "채움률": 0.5,
+    }
 
 
 def test_서술형은_보수티어의_키합의만_계산한다(
