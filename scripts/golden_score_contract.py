@@ -169,9 +169,16 @@ def 키값(field_name: str, value: Any) -> str:
 
 def 키(row: 행, sheet_name: str, relaxed: bool) -> str | None:
     fields = 이차키.get(sheet_name) if relaxed else 일차키.get(sheet_name)
-    if sheet_name == "12_대응기반강화" and not relaxed:
-        task_id = 키값("과제ID", row.값.get("과제ID"))
-        fields = ["과제ID"] if task_id else ["대응기반영역", "과제명"]
+    if not relaxed:
+        if sheet_name == "08_감축사업목록":
+            project_id = 키값("관리번호", row.값.get("관리번호"))
+            fields = ["관리번호"] if project_id else ["부문", "사업명"]
+        elif sheet_name == "09_연차별이행계획":
+            project_id = 키값("관리번호", row.값.get("관리번호"))
+            fields = ["관리번호", "연도"] if project_id else ["사업명", "연도"]
+        elif sheet_name == "12_대응기반강화":
+            task_id = 키값("과제ID", row.값.get("과제ID"))
+            fields = ["과제ID"] if task_id else ["대응기반영역", "과제명"]
     if not fields:
         return None
     parts: list[str] = []
