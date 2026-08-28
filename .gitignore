@@ -31,3 +31,6 @@ excel_source_verification*.json
 
 # 골든셋·인벤토리는 측정 기준 자산이라 추적한다
 !data/golden/*.xlsx
+
+# 제출 보고서 보관(로컬 전용, 미추적)
+docs/references/reports/
