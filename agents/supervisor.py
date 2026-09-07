@@ -891,6 +891,13 @@ class Supervisor:
             })
             if semantic_routing is not None:
                 pipeline_metrics.update(semantic_routing.metrics())
+            key_blank_stats = final_data.get("key_field_blank_ratio")
+            if isinstance(key_blank_stats, dict):
+                pipeline_metrics.update({
+                    f"key_field_blank_ratio.{key}": value.get("ratio")
+                    for key, value in key_blank_stats.items()
+                    if isinstance(value, dict)
+                })
             if source_object_inventory is not None:
                 pipeline_metrics.update({
                     "automatic_source_object_coverage": round(

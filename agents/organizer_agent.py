@@ -1369,6 +1369,171 @@ def _filter_empty_rows(rows: list[dict], required_fields: list[str]) -> list[dic
 # 시트별 정제 함수
 # ──────────────────────────────────────────────────────────────────────
 
+# ──────────────────────────────────────────────────────────────────────
+# v8-1 S1-3: 키(축) 필드 결정론 보완 — "빈칸 유지"는 값 필드에 한정한다.
+# 03 배출유형·04 직간접구분처럼 행을 구분하는 축 필드가 비면 행 대사 자체가
+# 불가하므로, 지자체 불변 규칙(흡수원 부문 → 흡수, 에너지원 토큰, 형제행
+# 유일값)으로 채우고 derivation_type으로 근거를 남긴다. 판정 불가면 빈칸 유지.
+# ──────────────────────────────────────────────────────────────────────
+_KEY_FIELD_BLANK_STATS: dict[str, dict[str, int | float]] = {}
+_EMISSION_KEY_LABELS = {
+    "emissions_management": {"direct": "직접", "indirect": "간접", "sink": "흡수"},
+    "emissions_regional": {"direct": "직접배출", "indirect": "간접배출", "sink": "흡수원"},
+}
+_SINK_SECTOR_TOKENS = ("흡수원", "lulucf", "산림", "흡수")
+_INDIRECT_ENERGY_TOKEN_RE = re.compile(
+    r"전력|전기|지역난방|스팀|steam|electricity|(?<![가-힣])열(?![가-힣])",
+    re.IGNORECASE,
+)
+_DIRECT_ENERGY_TOKEN_RE = re.compile(
+    r"연료|연소|도시가스|lng|lpg|석유|석탄|경유|등유|휘발유|fuel",
+    re.IGNORECASE,
+)
+_SINK_TOKEN_RE = re.compile(r"흡수원|lulucf|산림|흡수", re.IGNORECASE)
+
+
+def _key_blank_stat_key(sheet_key: str, field: str) -> str:
+    return f"{sheet_key}.{field}"
+
+
+def _record_key_field_blank_stats(
+    sheet_key: str,
+    rows: list[dict],
+    fields: tuple[str, ...],
+    municipality: str,
+    filled_by_rule: dict[str, int] | None = None,
+) -> None:
+    """시트별 키 필드 공란율을 pipeline_metrics·19_검증리포트에 남긴다(보완은 하지 않음)."""
+    filled_by_rule = filled_by_rule or {}
+    total = len(rows)
+    for field in fields:
+        blank = sum(1 for row in rows if not _has_cell_value(row.get(field)))
+        ratio = (blank / total) if total else 0.0
+        _KEY_FIELD_BLANK_STATS[_key_blank_stat_key(sheet_key, field)] = {
+            "total": total,
+            "blank": blank,
+            "ratio": round(ratio, 4),
+            "filled_by_rule": int(filled_by_rule.get(field, 0)),
+        }
+        if blank:
+            _remember_validation_issue(
+                municipality,
+                "정보",
+                _sheet_area(sheet_key),
+                "키 필드 공란",
+                f"{field} 공란 {blank}/{total}행 ({ratio:.1%}); 규칙 보완 {int(filled_by_rule.get(field, 0))}건",
+                "원문 표 헤더(직접/간접 축·시나리오·관리번호)를 확인",
+                target_sheet_key=sheet_key,
+            )
+
+
+def _energy_carrier_class(*texts: Any) -> str | None:
+    """세부부문·원문 표기의 에너지원 토큰으로 direct/indirect/sink를 판정한다. 혼재하면 None."""
+    joined = " ".join(str(text or "") for text in texts if _has_cell_value(text))
+    if not joined.strip():
+        return None
+    classes = set()
+    if _SINK_TOKEN_RE.search(joined):
+        classes.add("sink")
+    if _INDIRECT_ENERGY_TOKEN_RE.search(joined):
+        classes.add("indirect")
+    if _DIRECT_ENERGY_TOKEN_RE.search(joined):
+        classes.add("direct")
+    if len(classes) != 1:
+        return None
+    return classes.pop()
+
+
+def _row_page_set(row: dict) -> set[int]:
+    normalized = _normalize_provenance_pages(row.get("출처페이지"))
+    return {int(part) for part in normalized.split(",") if part.strip().isdigit()}
+
+
+def _fill_emission_type_key(
+    rows: list[dict],
+    *,
+    sheet_key: str,
+    sector_field: str,
+    subsector_field: str,
+    key_field: str,
+    municipality: str,
+) -> list[dict]:
+    labels = _EMISSION_KEY_LABELS[sheet_key]
+    raw_sector_field = f"{sector_field}원문"
+    key_fields = (
+        _MANAGEMENT_EMISSIONS_KEY_FIELDS
+        if sheet_key == "emissions_management"
+        else _REGIONAL_EMISSIONS_KEY_FIELDS
+    )
+    filled = 0
+    # 키 필드만 비고 나머지 키·수치가 채워진 행과 같은 빈 행은 dedup의 흡수 규칙이
+    # 같은 행으로 합치므로(_absorb_blank_key_rows) 여기서 새 값을 만들지 않는다.
+    keyed_rows = [row for row in rows if _has_cell_value(row.get(key_field))]
+    absorbable = {
+        id(row)
+        for row in rows
+        if not _has_cell_value(row.get(key_field))
+        and any(
+            _same_except_field(row, keyed, list(key_fields), key_field)
+            and not _row_conflicts(keyed, row)
+            for keyed in keyed_rows
+        )
+    }
+    # 규칙 1·2: 흡수원 부문 → 흡수, 에너지원 토큰 → 직접/간접/흡수.
+    for row in rows:
+        if _has_cell_value(row.get(key_field)) or id(row) in absorbable:
+            continue
+        sector_text = str(row.get(sector_field) or "").strip().casefold()
+        if any(token in sector_text for token in _SINK_SECTOR_TOKENS):
+            row[key_field] = labels["sink"]
+            _set_derivation_type(row, "normalized")
+            filled += 1
+            continue
+        carrier = _energy_carrier_class(
+            row.get(subsector_field), row.get(raw_sector_field), row.get(f"{subsector_field}원문")
+        )
+        if carrier is not None:
+            row[key_field] = labels[carrier]
+            _set_derivation_type(row, "inferred")
+            filled += 1
+    # 규칙 3: 같은 (부문, 세부부문)·출처페이지가 겹치는 형제행의 키 값이 한 종류면 전파.
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for row in rows:
+        group_key = (
+            _dedup_key_text(row.get(sector_field)),
+            _dedup_key_text(row.get(subsector_field)),
+        )
+        groups.setdefault(group_key, []).append(row)
+    for members in groups.values():
+        blanks = [
+            row for row in members
+            if not _has_cell_value(row.get(key_field)) and id(row) not in absorbable
+        ]
+        if not blanks:
+            continue
+        for blank in blanks:
+            pages = _row_page_set(blank)
+            if not pages:
+                continue
+            values = {
+                _dedup_key_text(row.get(key_field))
+                for row in members
+                if _has_cell_value(row.get(key_field)) and pages & _row_page_set(row)
+            }
+            if len(values) == 1:
+                source = next(
+                    row for row in members
+                    if _has_cell_value(row.get(key_field)) and pages & _row_page_set(row)
+                )
+                blank[key_field] = source[key_field]
+                _set_derivation_type(blank, "inferred")
+                filled += 1
+    _record_key_field_blank_stats(
+        sheet_key, rows, (key_field,), municipality, {key_field: filled}
+    )
+    return rows
+
+
 def _clean_document_meta(rows: list[dict], municipality: str) -> list[dict]:
     for row in rows:
         row["지자체명"] = row.get("지자체명") or municipality
@@ -1403,6 +1568,14 @@ def _clean_emissions_regional(rows: list[dict], municipality: str) -> list[dict]
         row["배출량"] = _to_float(row.get("배출량"))
         row["단위"] = _normalize_co2_unit(row.get("단위", ""))
     rows = _filter_empty_rows(rows, ["배출량"])
+    rows = _fill_emission_type_key(
+        rows,
+        sheet_key="emissions_regional",
+        sector_field="부문",
+        subsector_field="세부부문",
+        key_field="배출유형",
+        municipality=municipality,
+    )
     return _deduplicate_rows(rows, _REGIONAL_EMISSIONS_KEY_FIELDS)
 
 
@@ -1434,6 +1607,14 @@ def _clean_emissions_management(rows: list[dict], municipality: str) -> list[dic
         row["단위"] = _normalize_co2_unit(row.get("단위", ""))
     rows = [r for r in rows if r.get("관리부문")]
     rows = _filter_empty_rows(rows, ["배출량"])
+    rows = _fill_emission_type_key(
+        rows,
+        sheet_key="emissions_management",
+        sector_field="관리부문",
+        subsector_field="세부부문",
+        key_field="직간접구분",
+        municipality=municipality,
+    )
     return _deduplicate_rows(rows, _MANAGEMENT_EMISSIONS_KEY_FIELDS)
 
 
@@ -1466,6 +1647,7 @@ def _clean_emissions_forecast(rows: list[dict], municipality: str) -> list[dict]
                     row["전망방법코드"] = code
                     break
     rows = _filter_empty_rows(rows, ["전망값"])
+    _record_key_field_blank_stats("emissions_forecast", rows, ("시나리오", "부문"), municipality)
     return _deduplicate_rows(rows, ["지자체명", "시나리오", "부문", "연도"])
 
 
@@ -1606,7 +1788,11 @@ def _clean_annual_implementation(rows: list[dict], municipality: str) -> list[di
         row["기간종료"] = _to_int(row.get("기간종료"))
         row["연도"] = _to_int(row.get("연도"))
         row["목표물량"] = _to_float(row.get("목표물량"))
-    return _filter_empty_rows(rows, ["사업명", "연간계획", "목표물량"])
+    rows = _filter_empty_rows(rows, ["사업명", "연간계획", "목표물량"])
+    _record_key_field_blank_stats(
+        "annual_implementation", rows, ("관리번호", "사업명", "연도"), municipality
+    )
+    return rows
 
 
 def _clean_quantitative_reductions(rows: list[dict], municipality: str) -> list[dict]:
@@ -3401,6 +3587,7 @@ class OrganizerAgent:
 
         _DEDUP_CONFLICTS.clear()
         _RECORDED_VALIDATION_ISSUES.clear()
+        _KEY_FIELD_BLANK_STATS.clear()
         raw_counts: dict[str, int] = {}
         cleaned: dict = {"municipality_name": municipality}
         target_context_decisions: list[dict] = []
@@ -3495,6 +3682,11 @@ class OrganizerAgent:
                 sev[it["심각도"]] = sev.get(it["심각도"], 0) + 1
             print(f"[에이전트3 정리] 검증 리포트 {len(self._validation_report)}건: {sev}")
 
+        # 키 필드 공란율(시트.필드 → total/blank/ratio/filled_by_rule)은 엑셀 본문이 아니라
+        # pipeline_metrics·매니페스트로 전달한다(dict이므로 get_excel_ready에서 자연 제외).
+        cleaned["key_field_blank_ratio"] = {
+            key: dict(value) for key, value in sorted(_KEY_FIELD_BLANK_STATS.items())
+        }
         self._final_data = cleaned
         return cleaned
 
