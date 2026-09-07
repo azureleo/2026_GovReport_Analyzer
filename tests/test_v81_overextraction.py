@@ -126,12 +126,13 @@ def test_emission_guard_quarantines_only_contract_breaches() -> None:
         _row04(),
         _row04(연도=None),
         _row04(배출량=None),
-        _row04(관리부문="총배출량"),
-        _row04(관리부문="직접배출량"),
+        _row04(관리부문="총배출량", 데이터상태="visual_only"),
+        _row04(관리부문="직접배출량", 데이터상태="visual_only"),
+        _row04(관리부문="총배출량"),  # 텍스트 유래 합계 라벨 행은 정식 행(골든 03/04 계약)
         _row04(연도=2100),
     ]
     kept, records = guard_emission_rows(rows, "emissions_management")
-    assert [row["연도"] for row in kept] == [2018, 2018]
+    assert [row["연도"] for row in kept] == [2018, 2018, 2018]
     reasons = [record["reason_codes"] for record in records]
     assert reasons == [
         ["missing_key_contract"], ["missing_key_contract"],
@@ -222,7 +223,7 @@ def test_guard_disable_switch_covers_new_sheets(monkeypatch) -> None:
     monkeypatch.setattr(config, "SEMANTIC_OVEREXTRACTION_GUARD_ENABLED", False)
     cleaned = OrganizerAgent().organize({
         "municipality_name": "테스트시",
-        "emissions_management": [_row04(관리부문="총배출량")],
+        "emissions_management": [_row04(연도=2100)],
     })
     assert len(cleaned["emissions_management"]) == 1
     assert cleaned["semantic_contract_review"] == []

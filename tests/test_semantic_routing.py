@@ -51,7 +51,7 @@ def test_future_current_emission_on_forecast_table_is_reclassified() -> None:
             },
             {
                 "지자체명": "서울특별시",
-                "배출유형": "직접배출",
+                "배출유형": "",
                 "부문": "건물",
                 "연도": 2030,
                 "배출량": 100,
@@ -84,7 +84,7 @@ def test_duplicate_forecast_merges_provenance_before_source_removal() -> None:
         "document_meta": [{"계획시작연도": 2024}],
         "emissions_regional": [{
             "지자체명": "강원특별자치도",
-            "배출유형": "직접배출",
+            "배출유형": "",
             "부문": "건물",
             "연도": 2030,
             "배출량": 100,
@@ -154,7 +154,7 @@ def test_source_object_inventory_reports_wrong_sheet_semantics() -> None:
     final_data = {
         "emissions_regional": [{
             "지자체명": "서울특별시",
-            "배출유형": "직접배출",
+            "배출유형": "",
             "부문": "건물",
             "연도": 2030,
             "배출량": 100,
@@ -275,9 +275,9 @@ def test_object_can_match_any_human_allowed_body_sheet() -> None:
     assert inventory.rows[0].allowed_sheets == ["01_계획개요", "06_감축목표"]
 
 
-def test_default_keeps_future_current_emission_rows_and_flags_them() -> None:
-    """v8-1 S2-1: 기본값(자동 이동 OFF)에서는 03/04 미래연도 행을 옮기지 않고 오배치의심으로만 남긴다."""
-    assert config.SEMANTIC_ROUTING_AUTO_RECLASSIFY is False
+def test_axis_filled_future_rows_stay_in_current_sheet_even_with_auto_reclassify() -> None:
+    """v8-1 S2-5: 직간접구분이 채워진 행은 인벤토리 축 표에서 온 것이므로 전망 페이지에 있어도 04에 남긴다."""
+    assert config.SEMANTIC_ROUTING_AUTO_RECLASSIFY is True
     final_data = {
         "document_meta": [{
             "지자체명": "서울특별시", "계획명": "기본계획", "계획시작연도": 2024, "계획종료연도": 2033,
@@ -304,7 +304,7 @@ def test_reclassified_forecast_scenario_is_schema_enum_value() -> None:
             "지자체명": "서울특별시", "계획명": "기본계획", "계획시작연도": 2024, "계획종료연도": 2033,
         }],
         "emissions_regional": [{
-            "지자체명": "서울특별시", "배출유형": "직접배출", "부문": "건물",
+            "지자체명": "서울특별시", "배출유형": "", "부문": "건물",
             "연도": 2030, "배출량": 100, "단위": "천톤CO2eq", "출처페이지": 10,
         }],
         "emissions_forecast": [],

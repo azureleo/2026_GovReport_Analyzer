@@ -72,6 +72,13 @@ _SEMANTIC_TERMS: dict[str, tuple[str, ...]] = {
 }
 
 _CURRENT_EMISSION_SHEETS = {"emissions_regional", "emissions_management"}
+# 현황 시트의 축(키) 필드. 이 필드가 채워진 행은 표 자체가 인벤토리 축(직접/간접)을
+# 갖는다는 뜻이므로 전망 페이지에 있어도 현황 시트에 남긴다(골든 계약: 05에 관리권한
+# 축 필드가 없어 '관리 권한 내 배출량 전망'은 04에 둔다). 축이 빈 전망 연도행만 05로 옮긴다.
+_CURRENT_EMISSION_AXIS_FIELD = {
+    "emissions_regional": "배출유형",
+    "emissions_management": "직간접구분",
+}
 _NON_SEMANTIC_KEYS = {
     "_row_id", "_entity_id", "_추출원천", "출처페이지", "출처페이지추정", "데이터상태",
 }
@@ -607,6 +614,8 @@ def validate_and_reclassify(
 
     과거 기준연도 값은 전망표 안에 함께 있어도 현황 행으로 유효할 수 있으므로
     계획시작연도보다 이른 행은 오배치 분모와 자동 이동에서 제외한다.
+    축 필드(배출유형·직간접구분)가 채워진 행은 인벤토리 축을 가진 표에서 온 것이므로
+    전망 페이지에 있어도 옮기지 않는다(v8-1 S2-5). 오배치의심 플래그는 그대로 남긴다.
     """
     report = SemanticRoutingReport()
     page_targets = _page_targets(document, document_objects)
@@ -657,8 +666,11 @@ def validate_and_reclassify(
             report.mismatches_before += 1
             status = "오배치의심"
             action = "검토필요"
+            axis_field = _CURRENT_EMISSION_AXIS_FIELD.get(source_sheet, "")
+            axis_blank = not str(row.get(axis_field) or "").strip() if axis_field else True
             can_move_forecast = (
                 auto_reclassify
+                and axis_blank
                 and source_sheet in _CURRENT_EMISSION_SHEETS
                 and target.sheet_key == "emissions_forecast"
                 and plan_start is not None

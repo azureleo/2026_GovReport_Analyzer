@@ -144,11 +144,11 @@ SOURCE_OBJECT_INVENTORY_ENABLED = _env_bool("SOURCE_OBJECT_INVENTORY_ENABLED", T
 SOURCE_OBJECT_PARTIAL_WEIGHT = _env_float("SOURCE_OBJECT_PARTIAL_WEIGHT", 0.5)
 # 표 번호·캡션·섹션을 이용해 결과 행이 올바른 시트에 배치됐는지 별도로 검증한다.
 # 자동 이동은 계획 시작 이후의 배출현황 행이 명시적인 전망표에 놓인 경우로 제한한다.
-# 기본값은 검증(오배치의심 플래그·검증리포트)만 켜고 자동 이동은 끈다(v8-1 S2-1):
-# 03/04의 전망 연도행을 05로 옮기는 것은 골든 계약(v7-4 — 05에 지역전체/관리권한 축
-# 필드가 없어 관리권한 전망·목표 연도행을 04에 둠)과 충돌한다. 05 축 필드 신설 후 재검토.
+# 자동 이동은 축 필드(03 배출유형·04 직간접구분)가 빈 전망 연도행에만 적용한다(v8-1 S2-5):
+# 축이 채워진 행은 인벤토리 축을 가진 표(예: '관리 권한 내 배출량 전망')에서 온 것이라
+# 골든 계약(v7-4 — 05에 지역전체/관리권한 축 필드 없음)대로 03/04에 남긴다.
 SEMANTIC_ROUTING_ENABLED = _env_bool("SEMANTIC_ROUTING_ENABLED", True)
-SEMANTIC_ROUTING_AUTO_RECLASSIFY = _env_bool("SEMANTIC_ROUTING_AUTO_RECLASSIFY", False)
+SEMANTIC_ROUTING_AUTO_RECLASSIFY = _env_bool("SEMANTIC_ROUTING_AUTO_RECLASSIFY", True)
 SEMANTIC_ROUTING_MIN_SCORE = _env_float("SEMANTIC_ROUTING_MIN_SCORE", 5.0)
 SEMANTIC_ROUTING_MIN_MARGIN = _env_float("SEMANTIC_ROUTING_MIN_MARGIN", 1.5)
 # 한 표가 계획개요와 감축목표처럼 둘 이상의 본문 시트에 합법적으로 대응할 때,

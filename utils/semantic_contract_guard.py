@@ -471,7 +471,12 @@ def guard_emission_rows(
             or _number(row.get(value_field)) is None
         ):
             reasons.append("missing_key_contract")
-        if _is_metric_label_sector(row.get(sector_field)) or _is_metric_label_sector(row.get("세부부문")):
+        # 골든 03/04는 '총배출량(연료공급량기준)' 같은 합계 라벨 행을 정식 행으로 두므로
+        # 지표 라벨 판정은 06 가드와 같이 시각 유래 행에만 적용한다.
+        is_visual = str(row.get("데이터상태") or "").strip() == "visual_only"
+        if is_visual and (
+            _is_metric_label_sector(row.get(sector_field)) or _is_metric_label_sector(row.get("세부부문"))
+        ):
             reasons.append("metric_label_as_sector")
         if _year_out_of_bounds(row.get("연도"), year_bounds):
             reasons.append("year_out_of_document_range")
