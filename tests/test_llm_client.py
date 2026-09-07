@@ -379,7 +379,7 @@ class LLMClientTests(unittest.TestCase):
         original_run_codex = llm_client._run_codex
         original_sleep = llm_client.time.sleep
 
-        def fake_run_codex(prompt, *, image_paths=None, cwd, model=None):
+        def fake_run_codex(prompt, *, image_paths=None, cwd, model=None, timeout=None):
             calls["run"] += 1
             return '{"ok": true}'
 

@@ -191,6 +191,7 @@ class Supervisor:
         self._active_run_state: RunState | None = None
         self._artifact_stats: dict = {}
         self._vision_render_stats: dict = {}
+        self._vision_candidate_stats: dict = {}
 
     def mark_interrupted(self, reason: str = "") -> None:
         if self._active_run_state is not None:
@@ -639,6 +640,11 @@ class Supervisor:
                 except llm_client.LLMQuotaExceededError as exc:
                     logger.warning("이미지 분석 quota/한도 문제로 기존 텍스트 결과로 계속 진행: %s", exc)
                 self._add_vision_render_stats(image_agent.metrics())
+                self._vision_candidate_stats = {
+                    key: value
+                    for key, value in image_agent.metrics().items()
+                    if str(key).startswith("vision_") and isinstance(value, (int, float))
+                }
                 elapsed = time.time() - t0
                 self._add_timing("이미지 분석", elapsed)
                 self._log(image_agent.report())
@@ -892,6 +898,7 @@ class Supervisor:
             })
             if semantic_routing is not None:
                 pipeline_metrics.update(semantic_routing.metrics())
+            pipeline_metrics.update(self._vision_candidate_stats)
             key_blank_stats = final_data.get("key_field_blank_ratio")
             if isinstance(key_blank_stats, dict):
                 pipeline_metrics.update({

@@ -578,14 +578,22 @@ def _run_command(command: Sequence[str], prompt: str, *, cwd: Path, timeout: int
     return completed.stdout.strip()
 
 
+def local_agent_timeout(stage: str | None = None) -> int:
+    """로컬 에이전트 호출 타임아웃(초). vision 단계는 LOCAL_AGENT_VISION_TIMEOUT을 쓴다."""
+    if stage == "vision":
+        return int(getattr(config, "LOCAL_AGENT_VISION_TIMEOUT", 600))
+    return int(getattr(config, "LOCAL_AGENT_TIMEOUT", 300))
+
+
 def _run_codex(
     prompt: str,
     *,
     image_paths: Sequence[Path] | None = None,
     cwd: Path,
     model: str | None = None,
+    timeout: int | None = None,
 ) -> str:
-    timeout = int(getattr(config, "LOCAL_AGENT_TIMEOUT", 300))
+    timeout = int(timeout if timeout is not None else local_agent_timeout())
     command = _split_command(getattr(config, "CODEX_COMMAND", "codex"))
 
     with tempfile.TemporaryDirectory(prefix="carbon-codex-") as tmpdir:
@@ -653,10 +661,11 @@ def _run_claude(
     image_paths: Sequence[Path] | None = None,
     cwd: Path,
     model: str | None = None,
+    timeout: int | None = None,
 ) -> str:
     # Claude Code는 버전별 CLI 옵션 차이가 있어 가장 보편적인 print 모드를 사용한다.
     # 이미지가 있으면 prompt에 cwd 내부 임시 파일 경로가 포함되어 Claude가 읽을 수 있다.
-    timeout = int(getattr(config, "LOCAL_AGENT_TIMEOUT", 300))
+    timeout = int(timeout if timeout is not None else local_agent_timeout())
     base_command = _split_command(getattr(config, "CLAUDE_COMMAND", "claude"))
     paths = list(image_paths or [])
     command = [*base_command, "-p", "--output-format", "text"]
@@ -688,8 +697,10 @@ def _call_local_agent(
     images_b64: Sequence[str] | None = None,
     provider: str | None = None,
     model: str | None = None,
+    stage: str | None = None,
 ) -> str:
     provider = provider or _resolve_provider()
+    timeout = local_agent_timeout(stage)
     images = list(images_b64 or ([] if image_b64 is None else [image_b64]))
     # 호출마다 깨끗한 작업 디렉터리를 쓴다. 프로젝트 CLAUDE.md/AGENTS.md 자동 로드를
     # 막고, 이미지는 이 디렉터리 안에 기록해 에이전트가 cwd 내부에서 읽게 한다.
@@ -706,9 +717,9 @@ def _call_local_agent(
 
         prepared = _agent_prompt(prompt, system, image_path=image_path, image_paths=image_paths)
         if provider == "codex":
-            return _run_codex(prepared, image_paths=image_paths, cwd=workdir, model=model)
+            return _run_codex(prepared, image_paths=image_paths, cwd=workdir, model=model, timeout=timeout)
         if provider == "claude":
-            return _run_claude(prepared, image_paths=image_paths, cwd=workdir, model=model)
+            return _run_claude(prepared, image_paths=image_paths, cwd=workdir, model=model, timeout=timeout)
         raise RuntimeError(f"지원하지 않는 로컬 에이전트입니다: {provider}")
 
 
@@ -907,6 +918,7 @@ def _call_local_with_capacity(
                             images_b64=images_b64,
                             provider=provider,
                             model=selected_model or None,
+                            stage=stage,
                         ),
                         max_retries=max_retries,
                         label=(

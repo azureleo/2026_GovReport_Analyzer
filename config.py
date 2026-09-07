@@ -85,6 +85,9 @@ LOCAL_AGENT_MODEL = os.environ.get("LOCAL_AGENT_MODEL", "").strip()
 # 정상 추출 호출은 보통 1~2분 내 끝난다. 900초 기본값은 hang을 15분씩 방치해
 # 로컬 에이전트 실행을 수 시간 지연시켰으므로, 필요 시 env로만 되돌린다.
 LOCAL_AGENT_TIMEOUT = _env_int("LOCAL_AGENT_TIMEOUT", 300)
+# vision 호출은 이미지 페이로드·프롬프트가 커 텍스트보다 오래 걸린다. 로컬 에이전트의
+# vision 단계(stage="vision")에만 별도 타임아웃을 준다(v8-1 S3-3).
+LOCAL_AGENT_VISION_TIMEOUT = _env_int("LOCAL_AGENT_VISION_TIMEOUT", 600)
 # 타임아웃은 quota로 추정하지 않는다. 최초 호출 뒤 허용할 추가 재시도 횟수와
 # 재시도 간격을 별도로 제한해 한 배치가 수십 분씩 점유하지 않게 한다.
 LOCAL_AGENT_TIMEOUT_RETRIES = _env_int("LOCAL_AGENT_TIMEOUT_RETRIES", 1)
@@ -685,15 +688,19 @@ IMAGE_TRIAGE_MIN_SCORE = 5
 IMAGE_TRIAGE_KEEP_RENDERED_CONTEXT = True
 # DePlot 아이디어를 차용해 그래프/차트 이미지를 표 형태 JSON으로 먼저 변환
 IMAGE_CHART_TABLE_EXTRACTION = True
-# 전수 이미지 분석 시 여러 이미지를 한 번의 로컬 에이전트 호출로 묶는다.
+# 전수 이미지 분석 시 여러 이미지를 한 번의 호출로 묶는다. API 백엔드 기본 8,
+# 로컬 에이전트(codex/claude) 기본 4 — 무거운 vision 프롬프트로 배치당 타임아웃이
+# 잦아 완주가 불가했던 문제의 완화(v8-1 S3-3).
 IMAGE_ANALYSIS_BATCH_SIZE = _env_int("IMAGE_ANALYSIS_BATCH_SIZE", 8)
+IMAGE_ANALYSIS_BATCH_SIZE_LOCAL_AGENT = _env_int("IMAGE_ANALYSIS_BATCH_SIZE_LOCAL_AGENT", 4)
 # 비전 배치도 텍스트 배치와 같은 실행 원장에 저장하고, 실패 시 이미지 단위로 분할한다.
 VISION_CHECKPOINT_ENABLED = _env_bool("VISION_CHECKPOINT_ENABLED", True)
 VISION_SPLIT_ON_FAILURE = _env_bool("VISION_SPLIT_ON_FAILURE", True)
 VISION_RECOVERY_MAX_SPLIT_DEPTH = _env_int("VISION_RECOVERY_MAX_SPLIT_DEPTH", 6)
-# 루트 호출도 1회로 계산한다. 기본 7회는 최대 분할 깊이 6과 같은 상한이다.
+# 루트 호출도 1회로 계산한다. 기본 3회 — 계속 실패하는 객체 하나가 최대 7회×타임아웃을
+# 점유하던 것을 막는다(v8-1 S3-3). 상한 도달 객체는 needs_review로 원장에 남는다.
 VISION_RECOVERY_MAX_OBJECT_ATTEMPTS = _env_int(
-    "VISION_RECOVERY_MAX_OBJECT_ATTEMPTS", 7
+    "VISION_RECOVERY_MAX_OBJECT_ATTEMPTS", 3
 )
 # 강한 캡션·수치·단위 신호가 있는데도 비데이터로 판정된 객체만 전용 프롬프트로
 # 근거 ID당 한 번 재확인한다. 0은 실행 전체 객체 수 상한 없음이다.
@@ -757,7 +764,14 @@ OCR_RENDER_DPI = _env_int("OCR_RENDER_DPI", 200)
 OCR_RENDER_CACHE_ENABLED = _env_bool("OCR_RENDER_CACHE_ENABLED", True)
 # 캡션만 검출된 객체는 페이지 전체 대신 인접 이미지·표·벡터 영역을 먼저 복원한다.
 OCR_SPATIAL_RECONSTRUCTION_ENABLED = _env_bool("OCR_SPATIAL_RECONSTRUCTION_ENABLED", True)
+# 전체 페이지 문맥 렌더는 (a) 패널이 2개 이상이거나 (b) 객체 영역이 페이지 면적의
+# OCR_FULL_PAGE_CONTEXT_MAX_OBJECT_RATIO 미만일 때만 추가한다(v8-1 S3-2 — 프록시마다
+# 문맥 렌더가 붙어 vision 후보가 두 배로 늘던 문제).
 OCR_FULL_PAGE_CONTEXT_ENABLED = _env_bool("OCR_FULL_PAGE_CONTEXT_ENABLED", True)
+OCR_FULL_PAGE_CONTEXT_MAX_OBJECT_RATIO = _env_float("OCR_FULL_PAGE_CONTEXT_MAX_OBJECT_RATIO", 0.15)
+# 목차·표목차·그림목차 페이지의 캡션 참조는 판독 대상에서 제외한다(v8-1 S3-1).
+# 같은 페이지에 캡션 프록시가 이 수 이상이고 native 표·이미지·차트가 없으면 목록 페이지로 본다.
+OCR_INDEX_CAPTION_MIN_COUNT = _env_int("OCR_INDEX_CAPTION_MIN_COUNT", 5)
 OCR_MULTI_PANEL_GAP = _env_int("OCR_MULTI_PANEL_GAP", 24)
 OCR_CAPTION_REGION_MAX_HEIGHT_RATIO = _env_float(
     "OCR_CAPTION_REGION_MAX_HEIGHT_RATIO", 0.45

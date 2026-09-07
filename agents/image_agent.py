@@ -169,6 +169,32 @@ def _negative_revalidation_signals(image: dict) -> list[str]:
     return list(dict.fromkeys(propagated))
 
 
+def _vision_batch_size() -> int:
+    """vision 배치 크기 — 로컬 에이전트 백엔드는 IMAGE_ANALYSIS_BATCH_SIZE_LOCAL_AGENT를 쓴다."""
+    if llm_client.is_local_agent_provider("vision"):
+        value = getattr(config, "IMAGE_ANALYSIS_BATCH_SIZE_LOCAL_AGENT", 4)
+    else:
+        value = getattr(config, "IMAGE_ANALYSIS_BATCH_SIZE", 8)
+    return max(1, int(value or 1))
+
+
+def _candidate_metrics(pages_with_images: list[tuple[PageContent, dict]]) -> dict:
+    """게이트 보조 관찰용 vision 후보 집계(총수·렌더 변형별·배치 수)."""
+    by_variant: dict[str, int] = {}
+    for _page, image in pages_with_images:
+        variant = str(image.get("render_variant") or image.get("source_kind") or "embedded")
+        by_variant[variant] = by_variant.get(variant, 0) + 1
+    batch_size = _vision_batch_size()
+    metrics = {
+        "vision_candidates_total": len(pages_with_images),
+        "vision_batch_size": batch_size,
+        "vision_batches_total": -(-len(pages_with_images) // batch_size) if pages_with_images else 0,
+    }
+    for variant, count in sorted(by_variant.items()):
+        metrics[f"vision_candidates_variant.{variant}"] = count
+    return metrics
+
+
 def _is_relevant_image(image: dict) -> bool:
     w, h = image.get("width", 0), image.get("height", 0)
     if w > 0 and h > 0 and (w / h > 5 or h / w > 5):
@@ -2199,16 +2225,20 @@ BAU·감축량·감축률·신규·누계·예산 등 정량값은 fields 안에
                 confidence_threshold=float(
                     getattr(config, "OCR_NATIVE_CONFIDENCE_THRESHOLD", 0.78)
                 ),
+                page_texts={page.page_number: page.text or "" for page in pages},
             )
+            skipped_index_captions = sum(row.action == "skip_index_caption" for row in triage_decisions)
             apply_triage_metadata(native_objects, triage_decisions)
             required = [row for row in triage_decisions if row.action == "ocr_required"]
             self._object_outcomes.register(row.evidence_id for row in required)
             native_kept = sum(row.action == "native_keep" for row in triage_decisions)
+            physical_stats["vision_skipped_index_captions"] = skipped_index_captions
             print(
                 "[에이전트2b 이미지분석] 객체 기반 선택적 OCR: "
                 f"원시 {len(raw_native_objects)}개 → 물리객체 {len(native_objects)}개 "
                 f"(중복통합 {physical_duplicates}개) → 보완 {len(required)}개 "
-                f"(PyMuPDF 충분 {native_kept}개, 백엔드 {backend.name})"
+                f"(PyMuPDF 충분 {native_kept}개, 목차 캡션 제외 {skipped_index_captions}개, "
+                f"백엔드 {backend.name})"
             )
 
             if not backend.uses_vision:
@@ -2440,6 +2470,7 @@ BAU·감축량·감축률·신규·누계·예산 등 정량값은 fields 안에
 
         total = len(pages_with_images)
         print(f"[에이전트2b 이미지분석] 분석 대상 이미지: {total}개")
+        self._triage_stats.update(_candidate_metrics(pages_with_images))
 
         if total == 0:
             print("[에이전트2b 이미지분석] 분석할 이미지 없음.")
@@ -2461,7 +2492,7 @@ BAU·감축량·감축률·신규·누계·예산 등 정량값은 fields 안에
             return text_results
 
         analyses = []
-        batch_size = max(1, int(getattr(config, "IMAGE_ANALYSIS_BATCH_SIZE", 1) or 1))
+        batch_size = _vision_batch_size()
         image_batches = [
             pages_with_images[i:i + batch_size]
             for i in range(0, len(pages_with_images), batch_size)

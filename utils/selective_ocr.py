@@ -20,7 +20,7 @@ from PIL import Image
 
 import config
 from utils.document_objects import DocumentObject, parse_html_table, table_to_markdown
-from utils.object_routing import deduplicate_evidence_objects
+from utils.object_routing import deduplicate_evidence_objects, is_index_page
 from utils.pdf_reader import PDFContent, PageContent
 from utils.physical_objects import (
     PhysicalObjectIdentity,
@@ -354,13 +354,57 @@ class TriageDecision:
         }
 
 
+def _is_caption_placeholder(obj: DocumentObject) -> bool:
+    return bool(obj.metadata.get("caption_only") or obj.metadata.get("missing_native"))
+
+
+def index_caption_pages(
+    objects: list[DocumentObject],
+    page_texts: dict[int, str] | None = None,
+    *,
+    min_caption_count: int | None = None,
+) -> set[int]:
+    """목차·표목차·그림목차처럼 캡션 참조만 나열된 페이지 번호를 결정론적으로 판정한다.
+
+    (a) 페이지 본문이 목차 구조(is_index_page)이거나
+    (b) 캡션 프록시가 min_caption_count개 이상이고 native 표·이미지·차트·그림이 없으면 목록 페이지다.
+    지자체·키워드에 의존하지 않고 문서 구조만 본다(v8-1 S3-1).
+    """
+    threshold = (
+        int(min_caption_count)
+        if min_caption_count is not None
+        else int(getattr(config, "OCR_INDEX_CAPTION_MIN_COUNT", 5))
+    )
+    placeholders: dict[int, int] = {}
+    natives: dict[int, int] = {}
+    for obj in objects:
+        if obj.object_type not in {"table", "chart", "figure", "image"}:
+            continue
+        if obj.metadata.get("render_proxy"):
+            continue
+        if _is_caption_placeholder(obj):
+            placeholders[obj.page_number] = placeholders.get(obj.page_number, 0) + 1
+        else:
+            natives[obj.page_number] = natives.get(obj.page_number, 0) + 1
+    pages: set[int] = set()
+    for page_number, count in placeholders.items():
+        page_text = (page_texts or {}).get(page_number, "")
+        if page_text and is_index_page(page_text):
+            pages.add(page_number)
+        elif threshold > 0 and count >= threshold and natives.get(page_number, 0) == 0:
+            pages.add(page_number)
+    return pages
+
+
 def build_triage_plan(
     objects: list[DocumentObject],
     *,
     backend: str,
     confidence_threshold: float,
+    page_texts: dict[int, str] | None = None,
 ) -> list[TriageDecision]:
     decisions: list[TriageDecision] = []
+    index_pages = index_caption_pages(objects, page_texts)
     for obj in objects:
         confidence, reasons = native_confidence(obj)
         sample = obj.searchable_text().casefold()
@@ -372,6 +416,10 @@ def build_triage_plan(
         if render_proxy:
             action = "transport_only"
             reasons = [*reasons, "page_render_transport"]
+        elif _is_caption_placeholder(obj) and obj.page_number in index_pages:
+            # 목차의 "표 2-1 온실가스 배출 현황"은 데이터 용어를 포함하므로 강신호보다 우선한다.
+            action = "skip_index_caption"
+            reasons = [*reasons, "index_page_caption_reference"]
         elif obj.object_type == "text":
             action = "native_keep"
         elif obj.object_type == "table":
@@ -397,6 +445,9 @@ def build_triage_plan(
         if action == "native_keep":
             final_status = "extracted"
             terminal_reason = "PyMuPDF 기본 추출 사용"
+        elif action == "skip_index_caption":
+            final_status = "not_relevant"
+            terminal_reason = "목차·목록 페이지의 캡션 참조"
         elif action in {"skip_non_data", "transport_only"}:
             final_status = "not_relevant"
             terminal_reason = "비데이터 객체 또는 렌더 전송 프록시"
@@ -1433,11 +1484,26 @@ def reconstruct_candidate_regions(
         regions.append(CandidateRenderRegion(
             "fallback_full_page", tuple(bounds), "full_page_fallback"
         ))
-    elif getattr(config, "OCR_FULL_PAGE_CONTEXT_ENABLED", True):
+    elif getattr(config, "OCR_FULL_PAGE_CONTEXT_ENABLED", True) and _context_render_allowed(regions, bounds):
         regions.append(CandidateRenderRegion(
             "full_page_context", tuple(bounds), "page_context"
         ))
     return regions
+
+
+def _context_render_allowed(regions: list[CandidateRenderRegion], bounds: fitz.Rect) -> bool:
+    """패널 2개 이상이거나 객체 영역이 페이지 면적 비율 상한 미만일 때만 문맥 렌더를 붙인다."""
+    if any(region.variant == "panel" and region.panel_count >= 2 for region in regions):
+        return True
+    page_area = max(1.0, float(bounds.width) * float(bounds.height))
+    object_rects = [fitz.Rect(region.bbox) for region in regions if region.variant in {"object", "composite"}]
+    if not object_rects:
+        return True
+    union = _union_rects(object_rects)
+    if union is None:
+        return True
+    ratio = (float(union.width) * float(union.height)) / page_area
+    return ratio < float(getattr(config, "OCR_FULL_PAGE_CONTEXT_MAX_OBJECT_RATIO", 0.15))
 
 
 def _render_region_image(pdf_page: fitz.Page, rect: fitz.Rect) -> Image.Image:
