@@ -34,7 +34,7 @@ _SEMANTIC_TERMS: dict[str, tuple[str, ...]] = {
     ),
     "emissions_forecast": (
         "온실가스 배출량 전망", "배출량 전망", "배출 전망", "기준전망", "전망 결과",
-        "bau 시나리오", "bau 전망",
+        "bau 시나리오", "bau 전망", "배출량 bau 전망", "bau 배출량",
     ),
     "reduction_targets": (
         "온실가스 감축 목표", "온실가스 감축목표", "부문별 감축 목표", "부문별 감축목표",

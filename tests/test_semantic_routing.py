@@ -313,3 +313,14 @@ def test_reclassified_forecast_scenario_is_schema_enum_value() -> None:
     validate_and_reclassify(final_data, _forecast_document(), auto_reclassify=True)
 
     assert final_data["emissions_forecast"][0]["시나리오"] == "BAU"
+
+
+def test_bau_forecast_caption_with_interleaved_token_reaches_forecast_target() -> None:
+    """'배출량 BAU 전망' 같은 표기는 '배출량 전망' 용어와 토큰이 끼어 있어도 전망 표로 판정한다."""
+    from utils.semantic_routing import infer_semantic_target
+    target = infer_semantic_target(
+        caption="표 2-39 서울시 온실가스 배출량 BAU 전망",
+        section="현황 분석",
+        nearby_text="[표 2-39] 서울시 온실가스 배출량 BAU 전망 (단위: 천 톤CO2eq.) 2024 2025",
+    )
+    assert target is not None and target.sheet_key == "emissions_forecast"
