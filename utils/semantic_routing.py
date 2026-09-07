@@ -73,7 +73,7 @@ _SEMANTIC_TERMS: dict[str, tuple[str, ...]] = {
 
 _CURRENT_EMISSION_SHEETS = {"emissions_regional", "emissions_management"}
 _NON_SEMANTIC_KEYS = {
-    "_row_id", "_entity_id", "출처페이지", "출처페이지추정", "데이터상태",
+    "_row_id", "_entity_id", "_추출원천", "출처페이지", "출처페이지추정", "데이터상태",
 }
 _PROVENANCE_COPY_FIELDS = (
     "출처페이지",

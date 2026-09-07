@@ -147,7 +147,7 @@ _SECTOR_QUALIFIER_RE = re.compile(r"^\s*(?P<sector>[^()（）]+?)\s*[（(](?P<qu
 _IPCC_SECTOR_PREFIX_RE = re.compile(r"^\s*(?P<code>[1-4](?:[A-D]\d*)?)\s*(?P<label>[가-힣A-Za-z].*)$")
 _TABLE_MARKER_RE = re.compile(r"(?:\[\s*)?표\s*\d+\s*[-–—.]\s*\d+(?:\s*\])?")
 _DEDUP_TABLE_MARKER_FIELD = "__dedup_표마커"
-_INTERNAL_DEDUP_FIELDS = {_DEDUP_TABLE_MARKER_FIELD}
+_INTERNAL_DEDUP_FIELDS = {_DEDUP_TABLE_MARKER_FIELD, "_추출원천"}
 
 
 def _to_float(val: Any) -> float | None:

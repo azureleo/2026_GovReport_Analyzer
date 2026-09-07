@@ -16,7 +16,12 @@ import config
 
 
 FAILED_BATCH_STATUSES = frozenset({"call_fail", "parse_fail", "partial", "unresolved"})
-_VOLATILE_ROW_FIELDS = frozenset({"_row_id", "_entity_id"})
+# 추출 원천 태그(표객체/본문청크)는 병합 우선순위 판정에만 쓰고 행 동일성·체크포인트
+# 해시에서는 제외한다(같은 사실이 원천만 달라 다른 행으로 남지 않게).
+EXTRACTION_SOURCE_FIELD = "_추출원천"
+EXTRACTION_SOURCE_TABLE_OBJECT = "표객체"
+EXTRACTION_SOURCE_TEXT_CHUNK = "본문청크"
+_VOLATILE_ROW_FIELDS = frozenset({"_row_id", "_entity_id", EXTRACTION_SOURCE_FIELD})
 
 _ENTITY_FIELDS: dict[str, tuple[str, ...]] = {
     "document_meta": ("지자체명", "계획명"),
@@ -157,15 +162,43 @@ def _source_page_key(row: dict[str, Any]) -> tuple[int, str]:
     return (min(numbers) if numbers else 10**9, _canonical_json(canonical_row_payload(row)))
 
 
+def _row_pages(row: dict[str, Any]) -> frozenset[int]:
+    value = row.get("출처페이지")
+    numbers: set[int] = set()
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            try:
+                numbers.add(int(item))
+            except (TypeError, ValueError):
+                continue
+    elif value not in (None, ""):
+        numbers = {int(token) for token in re.findall(r"\d+", str(value))}
+    return frozenset(numbers)
+
+
+def _preferred_source_rank(row: dict[str, Any], prefer: tuple[str, ...]) -> int | None:
+    source = str(row.get(EXTRACTION_SOURCE_FIELD) or "").strip()
+    return prefer.index(source) if source in prefer else None
+
+
 def merge_rows_stably(
     sheet_key: str,
     existing: Iterable[dict[str, Any]],
     incoming: Iterable[dict[str, Any]],
+    *,
+    prefer: tuple[str, ...] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-    """정확히 같은 행은 제거하고, 같은 엔터티의 값 충돌은 둘 다 보존한다."""
+    """정확히 같은 행은 제거하고, 같은 엔터티의 값 충돌은 둘 다 보존한다.
+
+    prefer가 주어지면(예: ("표객체", "본문청크")) 같은 엔터티·같은 출처페이지의 충돌 쌍이
+    서로 다른 추출 원천에서 왔을 때만 우선 원천의 행을 남기고 나머지를 버린다 —
+    같은 표를 표 객체 청크와 본문 청크가 각각 추출한 이중 산출을 막기 위한 예외이며,
+    원천 태그가 없거나 같은 쌍은 기존대로 둘 다 보존한다.
+    """
     merged: dict[str, dict[str, Any]] = {}
     entities: dict[str, str] = {}
     conflicts: list[dict[str, str]] = []
+    prefer = tuple(prefer or ())
     def add_row(source: dict[str, Any], *, report_conflict: bool) -> None:
         if not isinstance(source, dict):
             return
@@ -176,12 +209,31 @@ def merge_rows_stably(
         entity_id = stable_entity_id(sheet_key, row)
         previous_row_id = entities.get(entity_id) if entity_id else None
         if report_conflict and previous_row_id and previous_row_id != row_id:
-            conflicts.append({
+            conflict = {
                 "sheet_key": sheet_key,
                 "entity_id": entity_id,
                 "kept_row_id": previous_row_id,
                 "incoming_row_id": row_id,
-            })
+            }
+            previous_row = merged.get(previous_row_id)
+            previous_rank = _preferred_source_rank(previous_row or {}, prefer)
+            incoming_rank = _preferred_source_rank(row, prefer)
+            if (
+                previous_row is not None
+                and previous_rank is not None
+                and incoming_rank is not None
+                and previous_rank != incoming_rank
+                and _row_pages(previous_row) == _row_pages(row)
+            ):
+                conflict["resolution"] = "table_object_preferred"
+                if incoming_rank < previous_rank:
+                    conflict["kept_row_id"], conflict["incoming_row_id"] = row_id, previous_row_id
+                    del merged[previous_row_id]
+                    entities[entity_id] = row_id
+                    merged[row_id] = row
+                conflicts.append(conflict)
+                return
+            conflicts.append(conflict)
         elif entity_id:
             entities[entity_id] = row_id
         merged[row_id] = row

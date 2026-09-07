@@ -19,7 +19,13 @@ from utils.pdf_reader import PageContent
 from utils.document_objects import DocumentObject, build_document_objects, render_table_object_chunks
 from utils import llm_client
 from utils.parallel import parallel_map, parallel_map_collect
-from utils.run_state import RunState, merge_rows_stably
+from utils.run_state import (
+    EXTRACTION_SOURCE_FIELD,
+    EXTRACTION_SOURCE_TABLE_OBJECT,
+    EXTRACTION_SOURCE_TEXT_CHUNK,
+    RunState,
+    merge_rows_stably,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -972,8 +978,33 @@ class ExtractorAgent:
         persisted = self.run_state.record_for(batch_id) or {}
         return persisted.get("result")
 
+    @staticmethod
+    def _child_extraction_source(child: dict) -> str:
+        """복구 자식의 object_id로 추출 원천을 판별한다(표 객체 청크 vs 본문 청크)."""
+        object_id = str(child.get("object_id") or "")
+        if not object_id:
+            return ""
+        if object_id.endswith("_text"):
+            return EXTRACTION_SOURCE_TEXT_CHUNK
+        return EXTRACTION_SOURCE_TABLE_OBJECT
+
+    @staticmethod
+    def _tag_child_rows(child: dict, rows: list[dict]) -> list[dict]:
+        source = ExtractorAgent._child_extraction_source(child)
+        if not source:
+            return rows
+        for row in rows:
+            if isinstance(row, dict) and not row.get(EXTRACTION_SOURCE_FIELD):
+                row[EXTRACTION_SOURCE_FIELD] = source
+        return rows
+
     def _merge_rows(self, sheet_key: str, existing: list[dict], incoming: list[dict]) -> list[dict]:
-        rows, conflicts = merge_rows_stably(sheet_key, existing, incoming)
+        rows, conflicts = merge_rows_stably(
+            sheet_key,
+            existing,
+            incoming,
+            prefer=(EXTRACTION_SOURCE_TABLE_OBJECT, EXTRACTION_SOURCE_TEXT_CHUNK),
+        )
         if self.run_state is not None:
             self.run_state.record_conflicts(conflicts)
         return rows
@@ -1173,7 +1204,7 @@ class ExtractorAgent:
         child_failed = False
         for child in children:
             try:
-                child_rows = self._run_sheet_task(child, municipality)
+                child_rows = self._tag_child_rows(child, self._run_sheet_task(child, municipality))
                 recovered = self._merge_rows(task["sheet_key"], recovered, child_rows)
                 if self.run_state is not None:
                     child_record = self.run_state.record_for(str(child.get("batch_id") or "")) or {}
@@ -1215,7 +1246,7 @@ class ExtractorAgent:
                     recovered[sheet_key] = self._merge_rows(
                         sheet_key,
                         recovered.setdefault(sheet_key, []),
-                        rows,
+                        self._tag_child_rows(child, list(rows)),
                     )
                 if self.run_state is not None:
                     child_record = self.run_state.record_for(str(child.get("batch_id") or "")) or {}
