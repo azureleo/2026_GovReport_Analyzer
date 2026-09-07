@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import config
-from agents.extractor_agent import ExtractorAgent
+from unittest.mock import patch
+
+from agents.extractor_agent import ExtractorAgent, _batch_char_limit, _build_semantic_batches
+from utils.pdf_reader import PageContent
 from agents.organizer_agent import OrganizerAgent
 from utils.run_state import (
     EXTRACTION_SOURCE_FIELD,
@@ -76,3 +79,25 @@ def test_child_rows_are_tagged_by_object_id() -> None:
     assert table_rows[0][EXTRACTION_SOURCE_FIELD] == EXTRACTION_SOURCE_TABLE_OBJECT
     assert text_rows[0][EXTRACTION_SOURCE_FIELD] == EXTRACTION_SOURCE_TEXT_CHUNK
     assert EXTRACTION_SOURCE_FIELD not in plain_rows[0]
+
+
+def _pages(count: int, chars: int) -> list[PageContent]:
+    return [PageContent(page_number=i, text="가" * chars, tables=[], images=[]) for i in range(1, count + 1)]
+
+
+def test_api_backend_has_no_batch_char_limit_by_default_but_local_agent_keeps_it() -> None:
+    with patch.object(config, "LLM_PROVIDER", "gemini"), patch.object(config, "STAGE_PROVIDERS", {}):
+        assert _batch_char_limit(0) is None
+        assert len(_build_semantic_batches(_pages(15, 5000), 15)) == 1
+        assert _batch_char_limit(1) == config.EXTRACTION_RECOVERY_MAX_BATCH_CHARS
+    with patch.object(config, "LLM_PROVIDER", "codex"), patch.object(config, "STAGE_PROVIDERS", {}):
+        assert _batch_char_limit(0) == config.EXTRACTION_MAX_BATCH_CHARS
+        assert len(_build_semantic_batches(_pages(15, 5000), 15)) > 1
+    with patch.object(config, "LLM_PROVIDER", "gemini"), patch.object(config, "STAGE_PROVIDERS", {}), \
+            patch.object(config, "EXTRACTION_MAX_BATCH_CHARS_API", 12000):
+        assert _batch_char_limit(0) == 12000
+        assert len(_build_semantic_batches(_pages(15, 5000), 15)) > 1
+    # 단계별 백엔드 지정이 우선한다.
+    with patch.object(config, "LLM_PROVIDER", "gemini"), \
+            patch.object(config, "STAGE_PROVIDERS", {"extraction": "codex"}):
+        assert _batch_char_limit(0) == config.EXTRACTION_MAX_BATCH_CHARS

@@ -102,7 +102,12 @@ EXTRACTION_TIMEOUT_RECOVERY_BUDGET_SECONDS = _env_int(
 # 타임아웃뿐 아니라 최종 호출 실패·JSON 파싱 실패도 작은 배치에서 복구한다.
 EXTRACTION_SPLIT_ON_FAILURE = _env_bool("EXTRACTION_SPLIT_ON_FAILURE", True)
 # 일반 호출의 최대 배치 문자 수. 초과 배치는 호출 전에 페이지/문서객체 단위로 분할한다.
+# 이 상한은 로컬 에이전트(codex/claude) 타임아웃 완화용이다. API 백엔드(gemini/openai)는
+# 별도 상한 EXTRACTION_MAX_BATCH_CHARS_API를 쓰며 기본 0(=상한 없음, BATCH_SIZE 페이지
+# 묶음 그대로) — 짧은 배치가 요약표·본문표·부록표의 같은 사실을 표기 변형으로 중복
+# 산출하는 과잉 추출을 막는다(v8-1 S2-3). 실패 복구 자식 상한은 양쪽 공통이다.
 EXTRACTION_MAX_BATCH_CHARS = _env_int("EXTRACTION_MAX_BATCH_CHARS", 18000)
+EXTRACTION_MAX_BATCH_CHARS_API = _env_int("EXTRACTION_MAX_BATCH_CHARS_API", 0)
 # 실패 복구 자식은 일반 배치보다 작게 유지한다.
 EXTRACTION_RECOVERY_MAX_BATCH_CHARS = _env_int("EXTRACTION_RECOVERY_MAX_BATCH_CHARS", 12000)
 # 단일 페이지의 큰 표는 헤더를 반복하면서 이 행 수 단위로 잘라 정규화한다.

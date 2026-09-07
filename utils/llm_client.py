@@ -289,6 +289,29 @@ def _stage_config_value(mapping_name: str, stage: str | None) -> str:
     return str(mapping.get(stage, "") or "").strip()
 
 
+_PROVIDER_ALIASES = {
+    "local": "codex",
+    "local-agent": "codex",
+    "claude-code": "claude",
+    "gemini-api": "gemini",
+    "gpt": "openai",
+    "openai-api": "openai",
+}
+LOCAL_AGENT_PROVIDERS = frozenset({"codex", "claude", "auto"})
+
+
+def provider_name(stage: str | None = None) -> str:
+    """설정만으로 단계 백엔드 이름을 돌려준다(CLI·API 키 가용성 검사 없음, 예외 없음)."""
+    stage_provider = _stage_config_value("STAGE_PROVIDERS", stage).lower()
+    provider = stage_provider or (getattr(config, "LLM_PROVIDER", "codex") or "codex").strip().lower()
+    return _PROVIDER_ALIASES.get(provider, provider)
+
+
+def is_local_agent_provider(stage: str | None = None) -> bool:
+    """codex/claude(및 auto)는 로컬 에이전트로 본다 — 배치·타임아웃 기본값 분기용."""
+    return provider_name(stage) in LOCAL_AGENT_PROVIDERS
+
+
 def _resolve_provider(stage: str | None = None) -> str:
     stage_provider = _stage_config_value("STAGE_PROVIDERS", stage).lower()
     provider = stage_provider or (getattr(config, "LLM_PROVIDER", "codex") or "codex").strip().lower()

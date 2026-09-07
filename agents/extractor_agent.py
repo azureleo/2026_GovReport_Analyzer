@@ -508,6 +508,23 @@ def _chunk_run(run: list[PageContent], batch_size: int) -> list[list[PageContent
     return chunks
 
 
+def _batch_char_limit(split_depth: int) -> int | None:
+    """텍스트 단계 백엔드에 맞는 배치 문자 상한을 돌려준다. None이면 상한 없음.
+
+    루트 배치(split_depth 0): 로컬 에이전트는 EXTRACTION_MAX_BATCH_CHARS, API 백엔드는
+    EXTRACTION_MAX_BATCH_CHARS_API(0 → 상한 없음). 복구 자식은 백엔드와 무관하게
+    EXTRACTION_RECOVERY_MAX_BATCH_CHARS.
+    """
+    if split_depth > 0:
+        return max(1000, int(getattr(config, "EXTRACTION_RECOVERY_MAX_BATCH_CHARS", 12000)))
+    if llm_client.is_local_agent_provider("extraction"):
+        return max(1000, int(getattr(config, "EXTRACTION_MAX_BATCH_CHARS", 18000)))
+    api_limit = int(getattr(config, "EXTRACTION_MAX_BATCH_CHARS_API", 0) or 0)
+    if api_limit <= 0:
+        return None
+    return max(1000, api_limit)
+
+
 def _build_semantic_batches(
     pages: list[PageContent],
     batch_size: int,
@@ -539,7 +556,9 @@ def _build_semantic_batches(
             current.extend(run)
     if current:
         batches.append(current)
-    max_chars = max(1000, int(getattr(config, "EXTRACTION_MAX_BATCH_CHARS", 18000)))
+    max_chars = _batch_char_limit(split_depth=0)
+    if max_chars is None:
+        return batches
     char_bounded: list[list[PageContent]] = []
     for batch in batches:
         current: list[PageContent] = []
@@ -1293,15 +1312,8 @@ class ExtractorAgent:
             )
         split_depth = int(task.get("split_depth", 0))
         max_depth = max(0, int(getattr(config, "EXTRACTION_TIMEOUT_MAX_SPLIT_DEPTH", 6)))
-        char_limit = max(
-            1000,
-            int(getattr(
-                config,
-                "EXTRACTION_MAX_BATCH_CHARS" if split_depth == 0 else "EXTRACTION_RECOVERY_MAX_BATCH_CHARS",
-                18000 if split_depth == 0 else 12000,
-            )),
-        )
-        if len(str(task.get("batch_text", ""))) > char_limit and split_depth < max_depth:
+        char_limit = _batch_char_limit(split_depth)
+        if char_limit is not None and len(str(task.get("batch_text", ""))) > char_limit and split_depth < max_depth:
             children = self._recovery_children(task, char_limit)
             if children:
                 self.preflight_splits += 1
@@ -1407,15 +1419,8 @@ class ExtractorAgent:
             )
         split_depth = int(task.get("split_depth", 0))
         max_depth = max(0, int(getattr(config, "EXTRACTION_TIMEOUT_MAX_SPLIT_DEPTH", 6)))
-        char_limit = max(
-            1000,
-            int(getattr(
-                config,
-                "EXTRACTION_MAX_BATCH_CHARS" if split_depth == 0 else "EXTRACTION_RECOVERY_MAX_BATCH_CHARS",
-                18000 if split_depth == 0 else 12000,
-            )),
-        )
-        if len(str(task.get("batch_text", ""))) > char_limit and split_depth < max_depth:
+        char_limit = _batch_char_limit(split_depth)
+        if char_limit is not None and len(str(task.get("batch_text", ""))) > char_limit and split_depth < max_depth:
             children = self._recovery_children(task, char_limit)
             if children:
                 self.preflight_splits += 1
