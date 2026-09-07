@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import config
 from utils.pdf_reader import PDFContent, PageContent
 from utils.document_objects import build_document_objects
 from utils.semantic_routing import validate_and_reclassify
@@ -63,7 +64,7 @@ def test_future_current_emission_on_forecast_table_is_reclassified() -> None:
         "emissions_forecast": [],
     }
 
-    report = validate_and_reclassify(final_data, _forecast_document())
+    report = validate_and_reclassify(final_data, _forecast_document(), auto_reclassify=True)
 
     assert [row["연도"] for row in final_data["emissions_regional"]] == [2021]
     assert final_data["emissions_forecast"][0]["연도"] == 2030
@@ -107,7 +108,7 @@ def test_duplicate_forecast_merges_provenance_before_source_removal() -> None:
         }],
     }
 
-    report = validate_and_reclassify(final_data, _forecast_document())
+    report = validate_and_reclassify(final_data, _forecast_document(), auto_reclassify=True)
 
     assert final_data["emissions_regional"] == []
     assert len(final_data["emissions_forecast"]) == 1
@@ -140,7 +141,7 @@ def test_reclassified_forecast_keeps_source_object_link() -> None:
         "emissions_forecast": [],
     }
 
-    validate_and_reclassify(final_data, document)
+    validate_and_reclassify(final_data, document, auto_reclassify=True)
     inventory = build_source_object_inventory(final_data, document)
 
     assert final_data["emissions_management"] == []
@@ -204,7 +205,7 @@ def test_mixed_semantic_tables_on_one_page_are_not_auto_reclassified() -> None:
         "emissions_forecast": [],
     }
 
-    report = validate_and_reclassify(final_data, document)
+    report = validate_and_reclassify(final_data, document, auto_reclassify=True)
 
     assert len(final_data["emissions_regional"]) == 1
     assert final_data["emissions_forecast"] == []
@@ -272,3 +273,43 @@ def test_object_can_match_any_human_allowed_body_sheet() -> None:
 
     assert inventory.rows[0].routing_status == "일치"
     assert inventory.rows[0].allowed_sheets == ["01_계획개요", "06_감축목표"]
+
+
+def test_default_keeps_future_current_emission_rows_and_flags_them() -> None:
+    """v8-1 S2-1: 기본값(자동 이동 OFF)에서는 03/04 미래연도 행을 옮기지 않고 오배치의심으로만 남긴다."""
+    assert config.SEMANTIC_ROUTING_AUTO_RECLASSIFY is False
+    final_data = {
+        "document_meta": [{
+            "지자체명": "서울특별시", "계획명": "기본계획", "계획시작연도": 2024, "계획종료연도": 2033,
+        }],
+        "emissions_management": [{
+            "지자체명": "서울특별시", "관리부문": "건물", "직간접구분": "직접",
+            "연도": 2030, "배출량": 100, "단위": "천톤CO2eq", "출처페이지": 10,
+        }],
+        "emissions_forecast": [],
+    }
+
+    report = validate_and_reclassify(final_data, _forecast_document())
+
+    assert [row["연도"] for row in final_data["emissions_management"]] == [2030]
+    assert final_data["emissions_forecast"] == []
+    assert report.reclassified_rows == 0
+    assert report.mismatches_after == 1
+    assert report.actions[0].status == "오배치의심"
+
+
+def test_reclassified_forecast_scenario_is_schema_enum_value() -> None:
+    final_data = {
+        "document_meta": [{
+            "지자체명": "서울특별시", "계획명": "기본계획", "계획시작연도": 2024, "계획종료연도": 2033,
+        }],
+        "emissions_regional": [{
+            "지자체명": "서울특별시", "배출유형": "직접배출", "부문": "건물",
+            "연도": 2030, "배출량": 100, "단위": "천톤CO2eq", "출처페이지": 10,
+        }],
+        "emissions_forecast": [],
+    }
+
+    validate_and_reclassify(final_data, _forecast_document(), auto_reclassify=True)
+
+    assert final_data["emissions_forecast"][0]["시나리오"] == "BAU"

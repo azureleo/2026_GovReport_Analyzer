@@ -566,7 +566,9 @@ def _merge_forecast_provenance(target: dict[str, Any], source: dict[str, Any]) -
 
 def _forecast_row(source_sheet: str, row: dict[str, Any], target: SemanticTarget) -> dict[str, Any]:
     sector = row.get("부문") if source_sheet == "emissions_regional" else row.get("관리부문")
-    scenario = "BAU" if any("bau" in keyword.casefold() for keyword in target.keywords) else "기준전망"
+    # 시나리오는 스키마 enum(BAU|정책반영|추가조치) 안의 값만 쓴다. 전망표 이동 행은
+    # 기준(현행 추세) 전망이므로 BAU로 둔다("기준전망"은 enum 밖 값이라 키 불일치를 만들었다).
+    scenario = "BAU"
     mapped = {
         "지자체명": row.get("지자체명"),
         "시나리오": scenario,
