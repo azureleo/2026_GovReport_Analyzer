@@ -34,6 +34,9 @@ from utils.reference_data import (
 from utils.reduction_target_context import classify_reduction_target_rows
 from utils.semantic_contract_guard import (
     apply_semantic_contract_guards,
+    document_year_bounds,
+    guard_annual_implementation,
+    guard_emission_rows,
     guard_foundation_measures,
     guard_reduction_targets,
 )
@@ -476,7 +479,9 @@ _VISUAL_MERGE_VALUE_FIELDS = {
     "financial_plan": "예산액",
     "foundation_measures": "값",
 }
+_ANNUAL_IMPLEMENTATION_KEY_FIELDS = ["지자체명", "관리번호", "사업명", "연도"]
 _BLANK_ABSORB_FIELDS_BY_KEY = {
+    tuple(_ANNUAL_IMPLEMENTATION_KEY_FIELDS): ("관리번호",),
     tuple(_REGIONAL_EMISSIONS_KEY_FIELDS): ("세부부문", "배출유형"),
     tuple(_MANAGEMENT_EMISSIONS_KEY_FIELDS): ("세부부문", "직간접구분"),
     tuple(_REDUCTION_TARGET_KEY_FIELDS): ("기준연도",),
@@ -1357,6 +1362,32 @@ def _deduplicate_rows(rows: list[dict], key_fields: list[str]) -> list[dict]:
     return _strip_dedup_internal_fields(deduped)
 
 
+# 정제기가 키 계약 미달로 제외한 행(시트키 → 행). 조용히 사라지지 않도록 격리 원장에 넘긴다.
+_CONTRACT_DROPS: dict[str, list[dict]] = {}
+
+
+def _drop_contract_unmet_rows(
+    sheet_key: str,
+    rows: list[dict],
+    *,
+    required_key_fields: tuple[str, ...] = (),
+    any_value_fields: tuple[str, ...] = (),
+) -> list[dict]:
+    """required_key_fields가 모두 있고 any_value_fields 중 하나라도 있는 행만 남긴다.
+    제외 행은 _CONTRACT_DROPS에 남겨 semantic_contract_review 원장에 기록한다."""
+    kept: list[dict] = []
+    for row in rows:
+        key_ok = all(_has_cell_value(row.get(field)) for field in required_key_fields)
+        value_ok = (not any_value_fields) or any(
+            row.get(field) is not None and str(row.get(field, "")).strip() for field in any_value_fields
+        )
+        if key_ok and value_ok:
+            kept.append(row)
+        else:
+            _CONTRACT_DROPS.setdefault(sheet_key, []).append(dict(row))
+    return kept
+
+
 def _filter_empty_rows(rows: list[dict], required_fields: list[str]) -> list[dict]:
     """required_fields 중 하나라도 값이 있는 행만 유지"""
     return [
@@ -1567,7 +1598,7 @@ def _clean_emissions_regional(rows: list[dict], municipality: str) -> list[dict]
         row["연도"] = _to_int(row.get("연도"))
         row["배출량"] = _to_float(row.get("배출량"))
         row["단위"] = _normalize_co2_unit(row.get("단위", ""))
-    rows = _filter_empty_rows(rows, ["배출량"])
+    rows = _drop_contract_unmet_rows("emissions_regional", rows, any_value_fields=("배출량",))
     rows = _fill_emission_type_key(
         rows,
         sheet_key="emissions_regional",
@@ -1605,8 +1636,9 @@ def _clean_emissions_management(rows: list[dict], municipality: str) -> list[dic
         row["연도"] = _to_int(row.get("연도"))
         row["배출량"] = _to_float(row.get("배출량"))
         row["단위"] = _normalize_co2_unit(row.get("단위", ""))
-    rows = [r for r in rows if r.get("관리부문")]
-    rows = _filter_empty_rows(rows, ["배출량"])
+    rows = _drop_contract_unmet_rows(
+        "emissions_management", rows, required_key_fields=("관리부문",), any_value_fields=("배출량",),
+    )
     rows = _fill_emission_type_key(
         rows,
         sheet_key="emissions_management",
@@ -1646,7 +1678,7 @@ def _clean_emissions_forecast(rows: list[dict], municipality: str) -> list[dict]
                 if keyword in method_raw:
                     row["전망방법코드"] = code
                     break
-    rows = _filter_empty_rows(rows, ["전망값"])
+    rows = _drop_contract_unmet_rows("emissions_forecast", rows, any_value_fields=("전망값",))
     _record_key_field_blank_stats("emissions_forecast", rows, ("시나리오", "부문"), municipality)
     return _deduplicate_rows(rows, ["지자체명", "시나리오", "부문", "연도"])
 
@@ -1788,11 +1820,14 @@ def _clean_annual_implementation(rows: list[dict], municipality: str) -> list[di
         row["기간종료"] = _to_int(row.get("기간종료"))
         row["연도"] = _to_int(row.get("연도"))
         row["목표물량"] = _to_float(row.get("목표물량"))
-    rows = _filter_empty_rows(rows, ["사업명", "연간계획", "목표물량"])
+    rows = _drop_contract_unmet_rows(
+        "annual_implementation", rows, any_value_fields=("관리번호", "사업명", "연간계획", "목표물량"),
+    )
     _record_key_field_blank_stats(
         "annual_implementation", rows, ("관리번호", "사업명", "연도"), municipality
     )
-    return rows
+    # 정확히 같은 행 제거·관리번호만 빈 행 흡수. 값(목표물량) 충돌은 기존 규칙대로 둘 다 보존.
+    return _deduplicate_rows(rows, _ANNUAL_IMPLEMENTATION_KEY_FIELDS)
 
 
 def _clean_quantitative_reductions(rows: list[dict], municipality: str) -> list[dict]:
@@ -1882,7 +1917,7 @@ def _mark_semantic_guarded_observations(
             _set_visual_merge_state(
                 observation,
                 "needs_review",
-                "06·12 의미 계약 과잉 추출 격리",
+                "의미 계약 과잉 추출 격리",
             )
 
 
@@ -1893,7 +1928,7 @@ def _apply_semantic_overextraction_guards(
 ) -> list[dict]:
     if not getattr(config, "SEMANTIC_OVEREXTRACTION_GUARD_ENABLED", True):
         return []
-    records = apply_semantic_contract_guards(cleaned)
+    records = apply_semantic_contract_guards(cleaned, contract_drops=_CONTRACT_DROPS)
     if not records:
         return []
 
@@ -1917,7 +1952,8 @@ def _apply_semantic_overextraction_guards(
         sheet_key: len(sheet_records)
         for sheet_key, sheet_records in by_sheet.items()
     }
-    print(f"[에이전트3 정리] 06·12 의미 계약 격리: {sheet_counts}")
+    sheet_labels = "·".join(_sheet_area(key)[:2] for key in sorted(sheet_counts)) or "-"
+    print(f"[에이전트3 정리] {sheet_labels} 의미 계약 격리: {sheet_counts}")
     return records
 
 
@@ -3566,6 +3602,12 @@ class OrganizerAgent:
                 cleaned_rows, _ = guard_reduction_targets(cleaned_rows)
             elif sheet_key == "foundation_measures":
                 cleaned_rows, _ = guard_foundation_measures(cleaned_rows)
+            elif sheet_key in ("emissions_regional", "emissions_management", "emissions_forecast"):
+                cleaned_rows, _ = guard_emission_rows(
+                    cleaned_rows, sheet_key, year_bounds=document_year_bounds(None),
+                )
+            elif sheet_key == "annual_implementation":
+                cleaned_rows, _ = guard_annual_implementation(cleaned_rows)
         cleaned = {
             "municipality_name": municipality,
             sheet_key: [_normalize_row_provenance(row) for row in cleaned_rows],
@@ -3588,6 +3630,7 @@ class OrganizerAgent:
         _DEDUP_CONFLICTS.clear()
         _RECORDED_VALIDATION_ISSUES.clear()
         _KEY_FIELD_BLANK_STATS.clear()
+        _CONTRACT_DROPS.clear()
         raw_counts: dict[str, int] = {}
         cleaned: dict = {"municipality_name": municipality}
         target_context_decisions: list[dict] = []

@@ -20,6 +20,7 @@ from utils import llm_cache, llm_client, parallel
 from utils.pipeline_artifacts import PipelineArtifacts
 from utils.run_state import RunState, sha256_json
 from utils.visual_merge_ab import write_visual_merge_snapshot
+from utils.semantic_contract_guard import summarize_quarantine, write_quarantine_ledger
 from utils.semantic_routing import SemanticRoutingReport, validate_and_reclassify
 from utils.source_verifier import (
     QualityAssessment,
@@ -954,6 +955,16 @@ class Supervisor:
         result_path = excel_agent.write(excel_data, output_path)
         elapsed = time.time() - t0
         self._add_timing("엑셀 작성", elapsed)
+        # 격리 원장은 엑셀 시트가 아니라 산출물 옆 JSON으로 남긴다(시트 계약 불변).
+        quarantine_records = final_data.get("semantic_contract_review") if final_data else None
+        if isinstance(quarantine_records, list):
+            try:
+                ledger_path = write_quarantine_ledger(quarantine_records, result_path)
+                self._log(
+                    f"[감독관] 의미 계약 격리 원장 {len(quarantine_records)}건: {ledger_path}"
+                )
+            except OSError as exc:
+                logger.warning("격리 원장 저장 실패: %s", exc)
         self._log(excel_agent.report())
         self._log(f"[감독관] 엑셀 작성 완료: {elapsed:.1f}초")
 
@@ -1037,6 +1048,9 @@ class Supervisor:
                     "llm_call_stats": llm_client.get_llm_stats(),
                     "parallel_queue_stats": parallel.get_parallel_stats(),
                     "pipeline_artifact_stats": dict(self._artifact_stats),
+                    "semantic_contract_review_summary": summarize_quarantine(
+                        final_data.get("semantic_contract_review") or []
+                    ),
                     "vision_render_stats": {
                         key: round(float(value), 3) if key.endswith("_seconds") else int(value)
                         for key, value in self._vision_render_stats.items()
