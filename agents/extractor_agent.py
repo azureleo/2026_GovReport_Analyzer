@@ -525,6 +525,12 @@ def _batch_char_limit(split_depth: int) -> int | None:
     return max(1000, api_limit)
 
 
+def _page_table_cells(page: PageContent) -> int:
+    """페이지의 표 셀 수 합. 행렬형 표의 예상 출력 행 수에 비례한다(표 요약 방지용)."""
+    records = getattr(page, "table_records", None) or []
+    return sum(int(record.get("cell_count") or 0) for record in records if isinstance(record, dict))
+
+
 def _build_semantic_batches(
     pages: list[PageContent],
     batch_size: int,
@@ -557,21 +563,32 @@ def _build_semantic_batches(
     if current:
         batches.append(current)
     max_chars = _batch_char_limit(split_depth=0)
-    if max_chars is None:
+    max_cells = max(0, int(getattr(config, "EXTRACTION_MAX_BATCH_TABLE_CELLS", 0) or 0))
+    if max_chars is None and max_cells <= 0:
         return batches
-    char_bounded: list[list[PageContent]] = []
+    bounded: list[list[PageContent]] = []
     for batch in batches:
         current: list[PageContent] = []
+        current_cells = 0
         for page in batch:
+            page_cells = _page_table_cells(page)
             candidate = [*current, page]
-            if current and len(_build_page_text(candidate)) > max_chars:
-                char_bounded.append(current)
+            over_chars = (
+                max_chars is not None
+                and bool(current)
+                and len(_build_page_text(candidate)) > max_chars
+            )
+            over_cells = max_cells > 0 and bool(current) and current_cells + page_cells > max_cells
+            if over_chars or over_cells:
+                bounded.append(current)
                 current = [page]
+                current_cells = page_cells
             else:
                 current = candidate
+                current_cells += page_cells
         if current:
-            char_bounded.append(current)
-    return char_bounded
+            bounded.append(current)
+    return bounded
 
 
 def _split_text_with_page_marker(page: PageContent, max_chars: int) -> list[str]:

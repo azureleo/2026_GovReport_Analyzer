@@ -227,3 +227,34 @@ def test_guard_disable_switch_covers_new_sheets(monkeypatch) -> None:
     })
     assert len(cleaned["emissions_management"]) == 1
     assert cleaned["semantic_contract_review"] == []
+
+
+def _table_page(page_number: int, cells: int, chars: int = 500) -> PageContent:
+    cols = 10
+    rows_count = max(1, cells // cols)
+    records = [{"cell_count": rows_count * cols, "row_count": rows_count, "column_count": cols}]
+    return PageContent(
+        page_number=page_number, text="가" * chars, tables=["<table></table>"],
+        images=[], table_records=records if cells else [],
+    )
+
+
+def test_table_cell_cap_closes_batches_independently_of_chars() -> None:
+    pages = [_table_page(i, cells=400) for i in range(1, 5)] + [_table_page(5, cells=0)]
+    with patch.object(config, "LLM_PROVIDER", "codex"), patch.object(config, "STAGE_PROVIDERS", {}), \
+            patch.object(config, "EXTRACTION_MAX_BATCH_CHARS", 60000), \
+            patch.object(config, "EXTRACTION_MAX_BATCH_TABLE_CELLS", 700):
+        batches = _build_semantic_batches(pages, 15)
+    # 400+400 > 700 → 두 페이지씩 끊기고, 표 없는 페이지는 마지막 배치에 붙는다.
+    assert [[p.page_number for p in b] for b in batches] == [[1], [2], [3], [4, 5]]
+    # 상한 0이면 기존 동작(문자 상한만).
+    with patch.object(config, "LLM_PROVIDER", "codex"), patch.object(config, "STAGE_PROVIDERS", {}), \
+            patch.object(config, "EXTRACTION_MAX_BATCH_CHARS", 60000), \
+            patch.object(config, "EXTRACTION_MAX_BATCH_TABLE_CELLS", 0):
+        batches = _build_semantic_batches(pages, 15)
+    assert [[p.page_number for p in b] for b in batches] == [[1, 2, 3, 4, 5]]
+    # API 백엔드(문자 상한 없음)에서도 셀 상한은 독립적으로 동작한다.
+    with patch.object(config, "LLM_PROVIDER", "gemini"), patch.object(config, "STAGE_PROVIDERS", {}), \
+            patch.object(config, "EXTRACTION_MAX_BATCH_TABLE_CELLS", 700):
+        batches = _build_semantic_batches(pages, 15)
+    assert len(batches) == 4

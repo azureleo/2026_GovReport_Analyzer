@@ -111,6 +111,11 @@ EXTRACTION_SPLIT_ON_FAILURE = _env_bool("EXTRACTION_SPLIT_ON_FAILURE", True)
 # 산출하는 과잉 추출을 막는다(v8-1 S2-3). 실패 복구 자식 상한은 양쪽 공통이다.
 EXTRACTION_MAX_BATCH_CHARS = _env_int("EXTRACTION_MAX_BATCH_CHARS", 18000)
 EXTRACTION_MAX_BATCH_CHARS_API = _env_int("EXTRACTION_MAX_BATCH_CHARS_API", 0)
+# 배치당 표 셀 수 상한(0 = 비활성). 행렬형 표(연도×부문)는 셀 하나가 출력 행 하나로
+# 펼쳐져, 한 배치에 표 셀이 몰리면 로컬 에이전트가 출력 예산 때문에 표를 요약해 버린다
+# (v8-1 서울 실측: 셀 ~640 배치는 완전 전사, ~1,400+ 배치는 20~50행으로 요약).
+# 문서의 표 구조만 사용하므로 지자체 불변. 문자 상한과 독립적으로 배치를 닫는다.
+EXTRACTION_MAX_BATCH_TABLE_CELLS = _env_int("EXTRACTION_MAX_BATCH_TABLE_CELLS", 0)
 # 실패 복구 자식은 일반 배치보다 작게 유지한다.
 EXTRACTION_RECOVERY_MAX_BATCH_CHARS = _env_int("EXTRACTION_RECOVERY_MAX_BATCH_CHARS", 12000)
 # 단일 페이지의 큰 표는 헤더를 반복하면서 이 행 수 단위로 잘라 정규화한다.
