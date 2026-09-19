@@ -9,6 +9,7 @@ import openpyxl
 from scripts.golden_score_contract import (
     골든열,
     계약헤더,
+    필수채점필드,
     데이터시트,
     문자열,
     시트자료,
@@ -57,16 +58,19 @@ def _행목록(ws, headers: list[str], *, golden: bool, sheet_name: str) -> tupl
 
 def _골든시트(ws, sheet_name: str) -> 시트자료:
     headers = [문자열(cell.value) for cell in ws[1]]
-    expected = 계약헤더(sheet_name)
     errors: list[str] = []
-    if headers[: len(expected)] != expected:
+    # 계약 검증은 config.EXCEL_HEADERS 순서 일치가 아니라 "채점 축이 읽는 필드가
+    # 골든 헤더에 존재하는가"로 한다. 행 값은 헤더 이름으로 읽으므로 열 순서·추가
+    # 열은 채점에 영향이 없고, config가 확장돼도(v8) 같은 골든을 같은 축으로 잰다.
+    required = 필수채점필드(sheet_name)
+    missing = [field for field in required if field not in headers]
+    if missing:
         if _제목행_추정(headers, sheet_name):
             errors.append(f"{sheet_name}: 1행이 제목 행으로 추정됩니다. 골든셋은 1행이 헤더여야 합니다.")
         else:
-            errors.append(f"{sheet_name}: 계약 컬럼이 명세와 다릅니다. 기대={expected}, 실제={headers[:len(expected)]}")
+            errors.append(f"{sheet_name}: 채점 필수 컬럼이 없습니다: {missing}")
     if sheet_name != "00_문서메타" and not errors:
-        golden_headers = headers[len(expected) : len(expected) + len(골든열)]
-        if golden_headers[:2] != 골든열[:2]:
+        if "골든_출처유형" not in headers or "골든_출처페이지" not in headers:
             errors.append(f"{sheet_name}: 골든_출처유형·골든_출처페이지 컬럼이 계약 컬럼 뒤에 필요합니다.")
     rows, excluded, row_errors, row_warnings = _행목록(ws, headers, golden=True, sheet_name=sheet_name)
     errors.extend(row_errors)

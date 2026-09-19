@@ -140,6 +140,26 @@ def 계약헤더(sheet_name: str) -> list[str]:
     return [header for header in config.EXCEL_HEADERS[sheet_name] if header not in 무시열]
 
 
+# 08·12의 엄격 키 폴백(M3-2 S1)이 참조하는 필드 — 골든 헤더 필수 검사에 포함한다.
+_폴백필드 = {
+    "08_감축사업목록": ["부문", "사업명"],
+    "12_대응기반강화": ["대응기반영역", "과제명", "과제ID"],
+}
+
+
+def 필수채점필드(sheet_name: str) -> list[str]:
+    """채점 축이 실제로 읽는 필드(키·값·폴백). 골든 헤더 검증은 config가 아니라
+    이 고정 계약을 기준으로 한다 — 파이프라인 config.EXCEL_HEADERS가 확장되어도
+    채점 축은 흔들리지 않는다(v9 통합에서 v8 config 결합 절단)."""
+    fields: list[str] = []
+    for source in (일차키.get(sheet_name, []), 이차키.get(sheet_name, []),
+                   값필드.get(sheet_name, []), _폴백필드.get(sheet_name, [])):
+        for field in source:
+            if field not in fields:
+                fields.append(field)
+    return fields
+
+
 def 값있음(value: Any) -> bool:
     return value is not None and str(value).strip() != ""
 
