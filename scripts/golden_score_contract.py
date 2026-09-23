@@ -147,15 +147,20 @@ _폴백필드 = {
 }
 
 
+# 행 단위 폴백 키 성분이라 골든에 없어도 되는 필드(구 골든 호환 — 있으면 확장 키로 잰다).
+_선택키필드 = {"05_배출전망": ["전망범위"]}
+
+
 def 필수채점필드(sheet_name: str) -> list[str]:
     """채점 축이 실제로 읽는 필드(키·값·폴백). 골든 헤더 검증은 config가 아니라
     이 고정 계약을 기준으로 한다 — 파이프라인 config.EXCEL_HEADERS가 확장되어도
     채점 축은 흔들리지 않는다(v9 통합에서 v8 config 결합 절단)."""
     fields: list[str] = []
+    optional = set(_선택키필드.get(sheet_name, []))
     for source in (일차키.get(sheet_name, []), 이차키.get(sheet_name, []),
                    값필드.get(sheet_name, []), _폴백필드.get(sheet_name, [])):
         for field in source:
-            if field not in fields:
+            if field not in fields and field not in optional:
                 fields.append(field)
     return fields
 
@@ -190,7 +195,12 @@ def 키값(field_name: str, value: Any) -> str:
 def 키(row: 행, sheet_name: str, relaxed: bool) -> str | None:
     fields = 이차키.get(sheet_name) if relaxed else 일차키.get(sheet_name)
     if not relaxed:
-        if sheet_name == "08_감축사업목록":
+        if sheet_name == "05_배출전망":
+            # 전망범위(v9-1)가 채워진 행은 확장 키로 잰다 — 관리권한 전망이 지역전체
+            # BAU 키에 엄격 오매칭되는 것을 차단. 비면 기존 키(구 골든·구 산출물 호환).
+            scope = 키값("전망범위", row.값.get("전망범위"))
+            fields = ["전망범위", "시나리오", "부문", "연도"] if scope else ["시나리오", "부문", "연도"]
+        elif sheet_name == "08_감축사업목록":
             project_id = 키값("관리번호", row.값.get("관리번호"))
             fields = ["관리번호"] if project_id else ["부문", "사업명"]
         elif sheet_name == "12_대응기반강화":

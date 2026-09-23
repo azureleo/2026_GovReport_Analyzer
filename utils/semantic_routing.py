@@ -573,11 +573,14 @@ def _merge_forecast_provenance(target: dict[str, Any], source: dict[str, Any]) -
 
 def _forecast_row(source_sheet: str, row: dict[str, Any], target: SemanticTarget) -> dict[str, Any]:
     sector = row.get("부문") if source_sheet == "emissions_regional" else row.get("관리부문")
+    # 출처 시트가 곧 인벤토리 축이다: 03(지역 인벤토리) → 지역전체, 04(관리권한 인벤토리) → 관리권한.
+    scope = "지역전체" if source_sheet == "emissions_regional" else "관리권한"
     # 시나리오는 스키마 enum(BAU|정책반영|추가조치) 안의 값만 쓴다. 전망표 이동 행은
     # 기준(현행 추세) 전망이므로 BAU로 둔다("기준전망"은 enum 밖 값이라 키 불일치를 만들었다).
     scenario = "BAU"
     mapped = {
         "지자체명": row.get("지자체명"),
+        "전망범위": scope,
         "시나리오": scenario,
         "전망방법코드": None,
         "전망방법원문": None,
@@ -598,7 +601,7 @@ def _forecast_row(source_sheet: str, row: dict[str, Any], target: SemanticTarget
 def _forecast_signature(row: dict[str, Any]) -> tuple[str, ...]:
     return tuple(
         _normalize(row.get(field))
-        for field in ("지자체명", "부문", "세부부문", "연도", "전망값", "단위")
+        for field in ("지자체명", "전망범위", "부문", "세부부문", "연도", "전망값", "단위")
     )
 
 
@@ -629,9 +632,17 @@ def validate_and_reclassify(
         forecast_rows = []
         final_data["emissions_forecast"] = forecast_rows
     forecast_by_signature: dict[tuple[str, ...], dict[str, Any]] = {}
+    # 전망범위가 빈 기존 행은 "축 미상"이므로, 같은 정체성의 이동 행이 오면 병합하며
+    # 축을 채운다(빈 축 별도 색인).
+    blank_scope_by_base: dict[tuple[str, ...], dict[str, Any]] = {}
+    def _base_signature(row: dict[str, Any]) -> tuple[str, ...]:
+        signature = _forecast_signature(row)
+        return signature[:1] + signature[2:]
     for row in forecast_rows:
         if isinstance(row, dict):
             forecast_by_signature.setdefault(_forecast_signature(row), row)
+            if not str(row.get("전망범위") or "").strip():
+                blank_scope_by_base.setdefault(_base_signature(row), row)
     source_snapshots = {
         sheet_key: list(rows)
         for sheet_key in getattr(config, "EXTRACTION_SHEETS", [])
@@ -691,6 +702,12 @@ def validate_and_reclassify(
                 mapped = _forecast_row(source_sheet, row, target)
                 signature = _forecast_signature(mapped)
                 removals[source_sheet].add(index)
+                if signature not in forecast_by_signature:
+                    blank_match = blank_scope_by_base.pop(_base_signature(mapped), None)
+                    if blank_match is not None:
+                        blank_match["전망범위"] = mapped.get("전망범위")
+                        forecast_by_signature[_forecast_signature(blank_match)] = blank_match
+                        signature = _forecast_signature(blank_match)
                 if signature in forecast_by_signature:
                     _merge_forecast_provenance(forecast_by_signature[signature], mapped)
                     report.removed_duplicates += 1

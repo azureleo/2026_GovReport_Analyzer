@@ -165,11 +165,12 @@ JSON 형식:
 
 주의:
 - 시나리오: BAU/정책반영/추가조치 등
+- 전망범위는 행 대사 키입니다. 표 제목·캡션·본문에 '관리 권한'(관리권한 내, 환경부 인벤토리 기준 등) 표기가 있으면 관리권한, 지역 전체·총배출량·GIR·시도 전체 산정이면 지역전체, 판정 불가면 null
 - 전망방법원문: 보고서가 명시한 전망 방법론 텍스트
 - 연도별 데이터는 연도마다 별도 행
 
 JSON 형식:
-{"emissions_forecast": [{"지자체명": "...", "시나리오": "BAU|정책반영|추가조치", "전망방법코드": "stat_time_series|stat_regression|stat_growth_rate|bottom_up_accounting_LEAP|기타", "전망방법원문": "...", "부문": "...", "세부부문": "...", "연도": 숫자, "전망값": 숫자or null, "단위": "tCO2eq|천톤CO2eq", "주요가정": "..."}]}
+{"emissions_forecast": [{"지자체명": "...", "전망범위": "지역전체|관리권한", "시나리오": "BAU|정책반영|추가조치", "전망방법코드": "stat_time_series|stat_regression|stat_growth_rate|bottom_up_accounting_LEAP|기타", "전망방법원문": "...", "부문": "...", "세부부문": "...", "연도": 숫자, "전망값": 숫자or null, "단위": "tCO2eq|천톤CO2eq", "주요가정": "..."}]}
 데이터가 없으면: {"emissions_forecast": []}""",
     },
 

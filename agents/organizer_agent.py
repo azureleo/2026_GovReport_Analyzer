@@ -453,6 +453,13 @@ _DERIVATION_TYPE_PRIORITY = {
     "external_lookup": 4,
 }
 _REGIONAL_EMISSIONS_KEY_FIELDS = ["지자체명", "배출유형", "부문", "세부부문", "연도"]
+_FORECAST_KEY_FIELDS = ["지자체명", "전망범위", "시나리오", "부문", "연도"]
+# 가이드라인 축 필드의 허용 값. enum 밖 값(예: 부문 라벨 '에너지')은 축 행세를 하며
+# 시트 귀속 규칙(S2-5)을 빠져나가므로 정규화 후에도 enum 밖이면 비운다(v9-1).
+_AXIS_ENUM = {
+    "배출유형": {"직접배출", "간접배출", "흡수원"},
+    "직간접구분": {"직접", "간접", "흡수", "직접+간접"},
+}
 _MANAGEMENT_EMISSIONS_KEY_FIELDS = ["지자체명", "관리부문", "세부부문", "직간접구분", "연도"]
 _REDUCTION_TARGET_KEY_FIELDS = ["지자체명", "목표수준", "목표범위", "부문", "기준연도", "목표연도"]
 _REDUCTION_SCALE_FIELDS = ("기준배출량", "배출전망", "목표감축량", "목표배출량")
@@ -461,7 +468,7 @@ _VISUAL_MERGE_KEY_FIELDS = {
     "regional_conditions": ["지자체명", "지표범주", "지표세부범주", "지표명", "연도"],
     "emissions_regional": _REGIONAL_EMISSIONS_KEY_FIELDS,
     "emissions_management": _MANAGEMENT_EMISSIONS_KEY_FIELDS,
-    "emissions_forecast": ["지자체명", "시나리오", "부문", "세부부문", "연도"],
+    "emissions_forecast": ["지자체명", "전망범위", "시나리오", "부문", "세부부문", "연도"],
     "reduction_targets": _REDUCTION_TARGET_KEY_FIELDS,
     "mitigation_projects": ["지자체명", "관리번호", "사업명"],
     "financial_plan": ["지자체명", "계획구분", "부문", "사업명", "재원구분", "연도"],
@@ -482,12 +489,13 @@ _VISUAL_MERGE_VALUE_FIELDS = {
 _ANNUAL_IMPLEMENTATION_KEY_FIELDS = ["지자체명", "관리번호", "사업명", "연도"]
 _BLANK_ABSORB_FIELDS_BY_KEY = {
     tuple(_ANNUAL_IMPLEMENTATION_KEY_FIELDS): ("관리번호",),
+    tuple(_FORECAST_KEY_FIELDS): ("전망범위", "세부부문"),
     tuple(_REGIONAL_EMISSIONS_KEY_FIELDS): ("세부부문", "배출유형"),
     tuple(_MANAGEMENT_EMISSIONS_KEY_FIELDS): ("세부부문", "직간접구분"),
     tuple(_REDUCTION_TARGET_KEY_FIELDS): ("기준연도",),
 }
 _VISUAL_OPTIONAL_KEY_FIELDS = {
-    "세부부문", "지표세부범주", "관리번호", "기준연도",
+    "세부부문", "지표세부범주", "관리번호", "기준연도", "전망범위",
     "평가유형", "리스크항목", "취약성지표", "미래기간",
 }
 _VISUAL_QUALITATIVE_SHEETS = {"mitigation_projects"}
@@ -1458,6 +1466,37 @@ def _record_key_field_blank_stats(
             )
 
 
+def _normalize_forecast_scope(value: Any) -> str:
+    """전망범위 표기를 enum(지역전체|관리권한)으로 접는다. 매핑 불가면 원값 유지(추측 금지)."""
+    text = re.sub(r"\s+", "", str(value or ""))
+    if not text:
+        return ""
+    if "관리권한" in text or "관리 권한" in str(value):
+        return "관리권한"
+    if text in {"지역전체", "전체", "지역", "시전체", "도전체", "총배출량기준", "지역단위"}:
+        return "지역전체"
+    return str(value).strip()
+
+
+def _enforce_axis_enum(rows: list[dict], key_field: str, sheet_key: str, municipality: str) -> None:
+    """정규화 후에도 축 enum 밖인 값을 비운다(S1-3 결정론 보완이 재충전을 시도한다)."""
+    allowed = _AXIS_ENUM[key_field]
+    invalid: dict[str, int] = {}
+    for row in rows:
+        value = str(row.get(key_field) or "").strip()
+        if value and value not in allowed:
+            invalid[value] = invalid.get(value, 0) + 1
+            row[key_field] = ""
+    if invalid:
+        top = ", ".join(f"'{value}' {count}건" for value, count in sorted(invalid.items(), key=lambda x: -x[1])[:5])
+        _remember_validation_issue(
+            municipality, "정보", _sheet_area(sheet_key), "축 필드 enum 밖 값 제거",
+            f"{key_field}에서 enum 밖 값 {sum(invalid.values())}건 제거({top})",
+            "원문 표의 직접/간접 축 표기를 확인",
+            target_sheet_key=sheet_key,
+        )
+
+
 def _energy_carrier_class(*texts: Any) -> str | None:
     """세부부문·원문 표기의 에너지원 토큰으로 direct/indirect/sink를 판정한다. 혼재하면 None."""
     joined = " ".join(str(text or "") for text in texts if _has_cell_value(text))
@@ -1599,6 +1638,7 @@ def _clean_emissions_regional(rows: list[dict], municipality: str) -> list[dict]
         row["배출량"] = _to_float(row.get("배출량"))
         row["단위"] = _normalize_co2_unit(row.get("단위", ""))
     rows = _drop_contract_unmet_rows("emissions_regional", rows, any_value_fields=("배출량",))
+    _enforce_axis_enum(rows, "배출유형", "emissions_regional", municipality)
     rows = _fill_emission_type_key(
         rows,
         sheet_key="emissions_regional",
@@ -1639,6 +1679,7 @@ def _clean_emissions_management(rows: list[dict], municipality: str) -> list[dic
     rows = _drop_contract_unmet_rows(
         "emissions_management", rows, required_key_fields=("관리부문",), any_value_fields=("배출량",),
     )
+    _enforce_axis_enum(rows, "직간접구분", "emissions_management", municipality)
     rows = _fill_emission_type_key(
         rows,
         sheet_key="emissions_management",
@@ -1653,6 +1694,11 @@ def _clean_emissions_management(rows: list[dict], municipality: str) -> list[dic
 def _clean_emissions_forecast(rows: list[dict], municipality: str) -> list[dict]:
     for row in rows:
         row["지자체명"] = row.get("지자체명") or municipality
+        scope_raw = row.get("전망범위")
+        normalized_scope = _normalize_forecast_scope(scope_raw)
+        row["전망범위"] = normalized_scope
+        if normalized_scope and normalized_scope != str(scope_raw or "").strip() and normalized_scope in {"지역전체", "관리권한"}:
+            _set_derivation_type(row, "normalized")
         scenario_raw = str(row.get("시나리오", "") or "").strip()
         normalized_scenario = scenario_raw
         for keyword, scenario in sorted(
@@ -1679,8 +1725,8 @@ def _clean_emissions_forecast(rows: list[dict], municipality: str) -> list[dict]
                     row["전망방법코드"] = code
                     break
     rows = _drop_contract_unmet_rows("emissions_forecast", rows, any_value_fields=("전망값",))
-    _record_key_field_blank_stats("emissions_forecast", rows, ("시나리오", "부문"), municipality)
-    return _deduplicate_rows(rows, ["지자체명", "시나리오", "부문", "연도"])
+    _record_key_field_blank_stats("emissions_forecast", rows, ("전망범위", "시나리오", "부문"), municipality)
+    return _deduplicate_rows(rows, _FORECAST_KEY_FIELDS)
 
 
 def _clean_reduction_targets(rows: list[dict], municipality: str) -> list[dict]:
@@ -2273,6 +2319,7 @@ def _visual_candidate_row(sheet_key: str, observation: dict, fields: dict, munic
             "합계포함여부": _visual_explicit_value(observation, fields, "합계포함여부") or "",
         }
     if sheet_key == "emissions_forecast":
+        scope = _normalize_forecast_scope(_visual_explicit_value(observation, fields, "전망범위", "목표범위") or "")
         scenario = _visual_explicit_value(observation, fields, "시나리오")
         if not _has_cell_value(scenario):
             scenario_text = f"{title} {fields.get('캡션', '')}".casefold()
@@ -2283,6 +2330,7 @@ def _visual_candidate_row(sheet_key: str, observation: dict, fields: dict, munic
             elif "정책반영" in scenario_text:
                 scenario = "정책반영"
         return base | {
+            "전망범위": scope if scope in {"지역전체", "관리권한"} else "",
             "시나리오": scenario,
             "전망방법코드": _visual_explicit_value(observation, fields, "전망방법코드") or "",
             "전망방법원문": _visual_explicit_value(observation, fields, "전망방법원문") or "",

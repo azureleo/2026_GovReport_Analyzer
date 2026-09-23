@@ -68,8 +68,9 @@ def test_prompts_carry_key_field_rule() -> None:
     regional = extractor_agent._SHEET_CONFIGS["emissions_regional"]["prompt"]
     assert "직간접구분은 행 대사 키" in management
     assert "배출유형은 행 대사 키" in regional
-    # 다른 시트 프롬프트는 불변(규칙 문구가 새지 않는다).
-    assert "행 대사 키" not in extractor_agent._SHEET_CONFIGS["emissions_forecast"]["prompt"]
+    # v9-1: 05 전망범위도 행 대사 키 규칙을 갖는다. 그 외 시트에는 새지 않는다.
+    assert "전망범위는 행 대사 키" in extractor_agent._SHEET_CONFIGS["emissions_forecast"]["prompt"]
+    assert "행 대사 키" not in extractor_agent._SHEET_CONFIGS["reduction_targets"]["prompt"]
 
 
 def _organize(sheet_key: str, rows: list[dict]) -> dict:
