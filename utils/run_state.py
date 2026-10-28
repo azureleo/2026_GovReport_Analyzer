@@ -32,7 +32,7 @@ _ENTITY_FIELDS: dict[str, tuple[str, ...]] = {
     "emissions_regional": ("지자체명", "배출유형", "부문", "세부부문", "연도", "단위"),
     "emissions_management": ("지자체명", "관리부문", "세부부문", "직간접구분", "연도", "단위"),
     "emissions_forecast": ("지자체명", "전망범위", "시나리오", "부문", "세부부문", "연도", "단위"),
-    "reduction_targets": ("지자체명", "목표수준", "목표범위", "부문", "기준연도", "목표연도"),
+    "reduction_targets": ("지자체명", "목표수준", "목표범위", "부문", "기준연도", "목표연도", "단위"),
     "vision_strategy": ("지자체명", "전략수준", "전략명"),
     "mitigation_projects": ("지자체명", "관리번호", "사업명", "부문"),
     "annual_implementation": ("지자체명", "관리번호", "사업명", "연도"),

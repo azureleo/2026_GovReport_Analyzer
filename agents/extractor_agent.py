@@ -475,6 +475,7 @@ class ExtractorAgent:
         *,
         strict: bool = False,
         force: bool = False,
+        reader=None,
     ) -> list:
         cfg = _SHEET_CONFIGS[sheet_key]
 
@@ -501,7 +502,9 @@ class ExtractorAgent:
         )
         if self._coverage_current_record is not None:
             self._coverage_current_record.update(model_requested=True, no_call_reason="")
-        resp = llm_client.call_text(full_prompt, system=EXTRACTION_SYSTEM)
+        # The optional transport boundary is used by saved-response recovery;
+        # the prompt, parser and strict response contract remain identical.
+        resp = (reader or llm_client.call_text)(full_prompt, system=EXTRACTION_SYSTEM)
         parsed = llm_client.parse_json(resp)
 
         if not parsed or not isinstance(parsed, dict):

@@ -47,7 +47,7 @@ ENTITY_FIELDS = {
     "emissions_regional": ("지자체명", "인벤토리출처", "배출범위", "배출유형", "부문", "세부부문", "연도", "단위"),
     "emissions_management": ("지자체명", "인벤토리출처", "관리부문", "세부부문", "직간접구분", "연도", "단위"),
     "emissions_forecast": ("지자체명", "시나리오", "전망범위", "부문", "세부부문", "연도", "단위"),
-    "reduction_targets": ("지자체명", "목표수준", "목표범위", "부문", "기준연도", "목표연도"),
+    "reduction_targets": ("지자체명", "목표수준", "목표범위", "부문", "기준연도", "목표연도", "단위"),
     "annual_implementation": ("지자체명", "관리번호", "사업명", "연도", "기간시작", "기간종료", "목표단위"),
     "quantitative_reductions": ("지자체명", "관리번호", "사업명", "연도", "단위", "감축량유형", "시간기준"),
     "financial_plan": ("지자체명", "계획구분", "부문", "사업명", "재원구분", "연도", "예산단위"),
@@ -77,7 +77,11 @@ def _lineage(row):
             values = json.loads(values)
         except ValueError:
             values = [{"legacy_lineage_unparsed": values}]
-    return values if isinstance(values, list) else [values]
+    if values:
+        return values if isinstance(values, list) else [values]
+    legacy = {key: row[key] for key in ("객체ID", "근거ID", "출처페이지", "source_object_ids", "source_evidence_ids")
+              if row.get(key) not in (None, "")}
+    return [legacy] if legacy else []
 
 
 def _merge_lineage(target, source):
@@ -96,6 +100,15 @@ def _merge_lineage(target, source):
             target[key] = values
     if source.get("OCR보완여부"):
         target["OCR보완여부"] = True
+    # Single evidence/object IDs also occur in older checkpoints without arrays.
+    # Retain those aliases when exact business facts are deduplicated.
+    for array_key, keys in (
+        ("source_evidence_ids", ("근거ID", "근거ID목록", "evidence_id", "evidence_ids", "source_evidence_ids")),
+        ("source_object_ids", ("객체ID", "object_id", "source_object_ids")),
+    ):
+        values = normalize_evidence_ids(*(row.get(key) for row in (target, source) for key in keys))
+        if values:
+            target[array_key] = sorted(values)
 
 
 def merge_extraction_rows(sheet_key: str, existing: list[dict], incoming: list[dict],

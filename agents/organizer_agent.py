@@ -441,7 +441,24 @@ def _clean_reduction_targets(rows: list[dict], municipality: str) -> list[dict]:
         row["목표감축량"] = _to_float(row.get("목표감축량"))
         row["목표배출량"] = _to_float(row.get("목표배출량"))
         row["감축률"] = _to_float(row.get("감축률"))
-    return _deduplicate_rows(rows, ["지자체명", "목표수준", "부문", "목표연도"])
+    # A management-only target and a target including additional reductions are
+    # different facts even when their sector/goal year agree. Never fill a blank
+    # scope from a neighbouring row, or let the first non-null value win.
+    from utils.evidence_merge import merge_extraction_rows
+    conflicts: list[dict] = []
+    for row in rows:
+        if row.get("_merge_conflict", {}).get("reason") == "reduction_target_value_conflict_retained":
+            row.pop("_merge_conflict", None)
+            row.pop("_merge_conflicts", None)
+    result = merge_extraction_rows("reduction_targets", [], rows, conflicts)
+    by_id = {record["conflict_id"]: record for record in conflicts}
+    for row in result:
+        if any(key in by_id for key in row.get("_merge_conflicts", [])):
+            row["_merge_conflict"] = {
+                "reason": "reduction_target_value_conflict_retained",
+                "conflicts": [by_id[key] for key in sorted(set(row["_merge_conflicts"])) if key in by_id],
+            }
+    return result
 
 
 def _clean_vision_strategy(rows: list[dict], municipality: str) -> list[dict]:
@@ -565,6 +582,7 @@ class OrganizerAgent:
             "emissions_regional": ("배출유형", "부문", "연도"),
             "emissions_management": ("관리부문", "직간접구분", "연도"),
             "emissions_forecast": ("전망범위", "시나리오", "부문", "연도"),
+            "reduction_targets": ("목표범위", "기준연도", "목표연도"),
         }
         stats: dict[str, dict] = {}
         for sheet_key, fields in key_fields.items():
@@ -583,6 +601,7 @@ class OrganizerAgent:
                         "항목": "축 필드 enum 밖 값 제거" if observation.get("reason") == "axis_outside_allowed_enum" else observation.get("reason", "키계약"),
                         "문제내용": json.dumps(observation, ensure_ascii=False, sort_keys=True),
                         "권장조치": "원문·근거ID 확인", "대상시트키": sheet_key,
+                        "대상시트": sheet_key, "사유": json.dumps(observation, ensure_ascii=False, sort_keys=True),
                         "출처페이지": row.get("출처페이지"), "근거ID": row.get("근거ID"),
                     }
                     if issue not in issues:
@@ -593,6 +612,8 @@ class OrganizerAgent:
         from utils.semantic_contract_guard import apply_semantic_contract_guards
         drops = {}
         for sheet_key in key_fields:
+            if sheet_key == "reduction_targets":
+                continue  # Target warnings do not imply missing emission values.
             value_field = "전망값" if sheet_key == "emissions_forecast" else "배출량"
             excluded = [row for row in raw_data.get(sheet_key, []) if isinstance(row, dict)
                         and (_to_float(row.get(value_field)) is None
