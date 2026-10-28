@@ -6,13 +6,30 @@ carbon_guideline.md 기반 16개 시트 구조에 맞춰 문서를 추출합니�
 """
 
 import logging
+import hashlib
+import json
 import re
+import time
 
 import config
 from utils.pdf_reader import PageContent
 from utils import llm_client
+from utils.document_objects import (DocumentObject, build_document_objects, parse_html_table,
+                                    render_table_object_chunks)
+from utils.evidence_merge import merge_extraction_rows, normalize_evidence_ids
+from utils.physical_objects import normalize_object_ids
+from utils.object_routing import deduplicate_evidence_objects, target_sheets_for_object
 
 logger = logging.getLogger(__name__)
+
+
+class PartialExtractionError(ValueError):
+    """Keep valid rows while recording malformed siblings as an incomplete batch."""
+
+    def __init__(self, rows: list[dict], invalid_rows: list[dict]):
+        super().__init__(f"extraction response contains {len(invalid_rows)} invalid row(s)")
+        self.rows = rows
+        self.invalid_rows = invalid_rows
 
 
 EXTRACTION_SYSTEM = """당신은 한국 지자체 탄소중립 녹색성장 기본계획 보고서에서
@@ -101,11 +118,12 @@ JSON 형식:
 
 주의:
 - 시나리오: BAU/정책반영/추가조치 등
+- 전망범위: 지역전체/관리권한. 원문이 해당 전망의 범위를 명시할 때만 기록하고, 근거가 부족하면 null. 지자체명이나 페이지 번호로 추측하지 않는다.
 - 전망방법원문: 보고서가 명시한 전망 방법론 텍스트
 - 연도별 데이터는 연도마다 별도 행
 
 JSON 형식:
-{"emissions_forecast": [{"지자체명": "...", "시나리오": "BAU|정책반영|추가조치", "전망방법코드": "stat_time_series|stat_regression|stat_growth_rate|bottom_up_accounting_LEAP|기타", "전망방법원문": "...", "부문": "...", "세부부문": "...", "연도": 숫자, "전망값": 숫자or null, "단위": "tCO2eq|천톤CO2eq", "주요가정": "..."}]}
+{"emissions_forecast": [{"지자체명": "...", "시나리오": "BAU|정책반영|추가조치", "전망범위": "지역전체|관리권한|null", "전망방법코드": "stat_time_series|stat_regression|stat_growth_rate|bottom_up_accounting_LEAP|기타", "전망방법원문": "...", "부문": "...", "세부부문": "...", "연도": 숫자, "전망값": 숫자or null, "단위": "tCO2eq|천톤CO2eq", "주요가정": "..."}]}
 데이터가 없으면: {"emissions_forecast": []}""",
     },
 
@@ -421,6 +439,22 @@ class ExtractorAgent:
     def __init__(self):
         self._raw_results: dict = {key: [] for key in _SHEET_CONFIGS}
         self._raw_results["municipality_name"] = ""
+        self.document_objects: list[DocumentObject] = []
+        self.extraction_records: list[dict] = []
+        self.merge_conflicts: list[dict] = []
+        self._completed_object_chunks: set[str] = set()
+        self._object_chunk_results: dict[str, list[dict]] = {}
+        self.coverage_routes: list[dict] = []
+        self._coverage_current_record = None
+
+    def _record_extraction(self, record):
+        if config.SOURCE_COVERAGE_MODE == "audit":
+            record.setdefault("model_requested", False)
+            record.setdefault("no_call_reason", "" if record["model_requested"] else
+                              "success_restored" if record.get("reused") or record.get("status") == "reused" else
+                              "retry_failed_only_not_selected" if record.get("status") == "unresolved" else
+                              record.get("reason", record.get("status", "boundary_not_observed")))
+        self.extraction_records.append(record)
 
     def _extract_municipality_name(self, full_text: str) -> str:
         prompt = (
@@ -438,10 +472,15 @@ class ExtractorAgent:
         batch_text: str,
         municipality: str,
         guideline_prompt: str = "",
+        *,
+        strict: bool = False,
+        force: bool = False,
     ) -> list:
         cfg = _SHEET_CONFIGS[sheet_key]
 
-        if not getattr(config, "FULL_DOCUMENT_SCAN", False) and not _has_keywords(batch_text, cfg["keywords"]):
+        if not force and not getattr(config, "FULL_DOCUMENT_SCAN", False) and not _has_keywords(batch_text, cfg["keywords"]):
+            if self._coverage_current_record is not None:
+                self._coverage_current_record.update(model_requested=False, no_call_reason="keyword_gate")
             return []
 
         guideline_block = ""
@@ -457,24 +496,283 @@ class ExtractorAgent:
             f"지자체명: {municipality}"
             f"{guideline_block}\n\n"
             f"[배치 텍스트]\n{batch_text}\n\n"
+            '각 행에 출처페이지를 정수 또는 정수 배열로 기록하세요. 명시된 object_id/evidence_id가 있으면 객체ID/근거ID로 보존하세요.\n'
             f"{cfg['prompt']}"
         )
+        if self._coverage_current_record is not None:
+            self._coverage_current_record.update(model_requested=True, no_call_reason="")
         resp = llm_client.call_text(full_prompt, system=EXTRACTION_SYSTEM)
         parsed = llm_client.parse_json(resp)
 
         if not parsed or not isinstance(parsed, dict):
+            if strict:
+                raise ValueError("extraction response is not a JSON object")
             return []
 
         items = parsed.get(sheet_key, [])
         if not isinstance(items, list):
+            if strict:
+                raise ValueError(f"extraction response {sheet_key} is not an array")
             return []
+        if strict and sheet_key not in parsed:
+            raise ValueError(f"extraction response missing {sheet_key}")
 
         for item in items:
             if not isinstance(item, dict):
                 continue
             if not item.get("지자체명"):
                 item["지자체명"] = municipality
-        return [item for item in items if isinstance(item, dict)]
+        rows = [item for item in items if isinstance(item, dict)]
+        invalid_rows = [{"index": index, "value": item} for index, item in enumerate(items, 1)
+                        if not isinstance(item, dict)]
+        if strict and invalid_rows:
+            raise PartialExtractionError(rows, invalid_rows)
+        return rows
+
+
+    def _merge_rows(self, sheet_key: str, existing: list, incoming: list) -> list:
+        start = len(self.merge_conflicts)
+        merged = merge_extraction_rows(sheet_key, existing, incoming, self.merge_conflicts)
+        state = getattr(self, "run_state", None)
+        if state is not None and len(self.merge_conflicts) > start:
+            state.record_conflicts(self.merge_conflicts[start:])
+        return merged
+
+    def _attach_sources(self, rows: list[dict], obj: DocumentObject, source: str, pages: list[int]):
+        engine = str(obj.metadata.get("engine") or "pymupdf")
+        is_ocr = source.startswith("ocr") or bool(obj.metadata.get("ocr_supplement"))
+        eid = str(obj.metadata.get("evidence_id") or f"ev-{obj.object_id}")
+        object_source_ids = normalize_object_ids(obj.object_id, obj.metadata.get("source_object_ids"),
+            obj.metadata.get("alias_object_ids"), obj.metadata.get("ocr_original_object_id"))
+        object_evidence_ids = normalize_evidence_ids(eid, obj.metadata.get("source_evidence_id"),
+            obj.metadata.get("source_evidence_ids"))
+        source_engines = list(normalize_object_ids(obj.metadata.get("source_engines"), engine))
+        lineage = {"object_id": obj.object_id, "evidence_id": eid, "page_numbers": pages,
+                   "bbox": list(obj.bbox) if obj.bbox else None, "engine": engine, "source": source,
+                   "source_engines": source_engines}
+        for field in ("ocr_source_file", "ocr_source_line", "ocr_document_trust", "ocr_selection_method",
+                      "ocr_status", "physical_object_id", "canonical_object_id", "ocr_backend"):
+            if obj.metadata.get(field) not in (None, ""):
+                lineage[field] = obj.metadata[field]
+        for row in rows:
+            original_eids = normalize_evidence_ids(row.get("근거ID"), row.get("근거ID목록"),
+                row.get("evidence_id"), row.get("evidence_ids"), row.get("source_evidence_ids"))
+            original_oids = normalize_object_ids(row.get("객체ID"), row.get("근거객체ID"),
+                row.get("object_id"), row.get("source_object_ids"))
+            if original_eids:
+                row.setdefault("원본근거ID", list(original_eids))
+            if original_oids:
+                row.setdefault("원본객체ID", list(original_oids))
+            if not row.get("출처페이지"):
+                row["출처페이지"] = pages
+            row["객체ID"] = obj.object_id
+            row["근거ID"] = eid
+            row["추출원천"] = source
+            row["추출엔진"] = engine
+            row["_추출원천"] = "표객체" if obj.object_type == "table" else "본문청크"
+            row["source_object_ids"] = list(normalize_object_ids(object_source_ids, original_oids))
+            row["evidence_ids"] = normalize_evidence_ids(object_evidence_ids, original_eids)
+            row["근거ID목록"] = row["evidence_ids"]
+            row["source_evidence_ids"] = row["evidence_ids"]
+            row["source_engines"] = list(normalize_object_ids(row.get("source_engines"), source_engines))
+            for field in ("ocr_source_file", "ocr_source_line"):
+                if field in lineage:
+                    row[field] = lineage[field]
+            row_lineage = {**lineage, "source_evidence_ids": row["evidence_ids"],
+                           "source_object_ids": row["source_object_ids"]}
+            row.setdefault("_extraction_sources", []).append(row_lineage)
+            row["출처계보"] = json.dumps(row["_extraction_sources"], ensure_ascii=False, sort_keys=True)
+            row["OCR보완여부"] = is_ocr
+        return rows
+
+    def _run_extraction_batch(self, sheet_key: str, text: str, municipality: str,
+                              guideline_prompt: str, obj: DocumentObject, source: str,
+                              pages: list[int]) -> list[dict]:
+        """Persist complete/failed batches independently; a failure preserves other rows."""
+        state = getattr(self, "run_state", None)
+        request = json.dumps({"prompt": guideline_prompt, "source": source,
+                              "municipality": municipality,
+                              "schema_prompt": _SHEET_CONFIGS[sheet_key]["prompt"]},
+                             ensure_ascii=False, sort_keys=True)
+        fingerprint = hashlib.sha256((sheet_key + text + request).encode()).hexdigest()
+        batch_id = state.batch_id(kind="sheet", sheet_keys=[sheet_key], page_nums=pages,
+                                  batch_text=text, request_fingerprint=fingerprint) if state else fingerprint[:32]
+        source_table_cells = (max((len(row) for row in obj.rows), default=0) * len(obj.rows)
+                              if obj.rows else int(obj.metadata.get("source_table_cells", 0)))
+        if obj.object_type == "table" and "table_markdown:\n" in text:
+            table_text = text.rsplit("table_markdown:\n", 1)[1]
+            table_cells = sum(line.count("|") - 1 for line in table_text.splitlines()
+                              if line.startswith("|") and not re.fullmatch(r"[|\s:\-]+", line))
+        else:
+            table_cells = source_table_cells
+        record = {"batch_id": batch_id, "kind": "sheet", "sheet_key": sheet_key,
+                  "page_nums": pages, "object_id": obj.object_id,
+                  "evidence_id": obj.metadata.get("evidence_id"), "source": source,
+                  "engine": obj.metadata.get("engine"), "input_chars": len(text),
+                  "table_cells": table_cells, "source_table_cells": source_table_cells, "status": "pending"}
+        if obj.metadata.get("table_measurement_errors"):
+            record["table_measurement_errors"] = obj.metadata["table_measurement_errors"]
+        if state:
+            state.register_expected(batch_id, {"kind": "sheet", "sheet_keys": [sheet_key], "page_nums": pages})
+            restored = state.restored_result(batch_id)
+            if isinstance(restored, list):
+                record.update(status="ok", rows=len(restored), reused=True)
+                self._record_extraction(record)
+                return restored
+            if not state.should_execute(batch_id):
+                record.update(status="unresolved", rows=0, error="batch was not attempted in retry-failed-only mode")
+                self._record_extraction(record)
+                return []
+        started = time.perf_counter()
+        if config.SOURCE_COVERAGE_MODE == "audit":
+            record["input_sha256"] = hashlib.sha256(text.encode()).hexdigest()
+            self._coverage_current_record = record
+        try:
+            rows = self._extract_sheet(sheet_key, text, municipality, guideline_prompt,
+                                       strict=True, force=obj.metadata.get("force_extract", False))
+            rows = self._attach_sources(rows, obj, source, pages)
+            record.update(status="ok", rows=len(rows), elapsed_seconds=time.perf_counter() - started)
+            if state:
+                state.record_batch(batch_id=batch_id, kind="sheet", sheet_keys=[sheet_key],
+                                   page_nums=pages, status="ok", result=rows)
+        except PartialExtractionError as exc:
+            rows = self._attach_sources(exc.rows, obj, source, pages)
+            record.update(status="partial" if rows else "parse_fail", rows=len(rows),
+                          invalid_row_count=len(exc.invalid_rows), invalid_rows=exc.invalid_rows,
+                          error=str(exc), elapsed_seconds=time.perf_counter() - started)
+            if state:
+                state.record_batch(batch_id=batch_id, kind="sheet", sheet_keys=[sheet_key],
+                                   page_nums=pages, status=record["status"], result=rows, error=str(exc))
+                saved = state.record_for(batch_id)
+                if saved and isinstance(saved.get("result"), list):
+                    rows = self._merge_rows(sheet_key, rows, saved["result"])
+                    record.update(rows=len(rows), status=saved["status"], recovered=bool(saved.get("recovered")))
+        except Exception as exc:
+            logger.warning("Extraction batch %s failed: %s", batch_id, exc)
+            record.update(status="parse_fail" if isinstance(exc, ValueError) else "call_fail",
+                          rows=0, error=str(exc), elapsed_seconds=time.perf_counter() - started)
+            rows = []
+            if state:
+                state.record_batch(batch_id=batch_id, kind="sheet", sheet_keys=[sheet_key],
+                                   page_nums=pages, status=record["status"], result=[], error=str(exc))
+                saved = state.record_for(batch_id)
+                if saved and isinstance(saved.get("result"), list) and saved["result"]:
+                    rows = saved["result"]
+                    record.update(rows=len(rows), status=saved["status"], recovered=True)
+        self._coverage_current_record = None
+        self._record_extraction(record)
+        return rows
+
+    def extract_objects(self, objects: list[DocumentObject], municipality: str,
+                        extraction_prompts: dict[str, str], *, sheet_keys=None) -> dict:
+        """Re-extract selected changed objects, never a whole OCR page or document."""
+        output = {key: [] for key in _SHEET_CONFIGS}
+        for obj in sorted(objects, key=lambda item: (item.page_number, item.object_id)):
+            if obj.metadata.get("index_reference") or obj.metadata.get("is_index_reference"):
+                continue
+            if obj.object_type not in {"table", "text"} or not (obj.rows or obj.text):
+                self._record_extraction({"object_id": obj.object_id, "status": "no_content",
+                                                "reason": "changed object has no extractable text/table"})
+                continue
+            targets = list(sheet_keys) if sheet_keys is not None else target_sheets_for_object(obj)
+            targets = [key for key in targets if key in _SHEET_CONFIGS]
+            if not targets:
+                self._record_extraction({"object_id": obj.object_id, "status": "unrouted",
+                                                "reason": "no sheet supported by object evidence"})
+                continue
+            try:
+                if obj.object_type == "table":
+                    chunks = render_table_object_chunks(obj,
+                        rows_per_chunk=getattr(config, "TABLE_OBJECT_ROWS_PER_CHUNK", 20),
+                        max_chars=getattr(config, "MAX_BATCH_CHARS", None),
+                        max_cells=getattr(config, "MAX_BATCH_TABLE_CELLS", None))
+                else:
+                    cap = getattr(config, "MAX_BATCH_CHARS", None)
+                    prefix = f"=== 페이지 {obj.page_number} ===\nobject_id: {obj.object_id}\nevidence_id: {obj.metadata.get('evidence_id', '')}\n"
+                    width = max(1, cap - len(prefix)) if cap else max(1, len(obj.text))
+                    if cap and len(prefix) >= cap:
+                        raise ValueError("text object metadata exceeds configured character limit")
+                    chunks = [prefix + obj.text[offset:offset + width] for offset in range(0, len(obj.text), width)]
+            except ValueError as exc:
+                self._record_extraction({"object_id": obj.object_id, "status": "batch_limit",
+                                                "error": str(exc), "reason": "object retained without truncation"})
+                state = getattr(self, "run_state", None)
+                if state:
+                    batch_id = state.batch_id(kind="sheet", sheet_keys=targets,
+                                              page_nums=[obj.page_number], batch_text=obj.searchable_text(),
+                                              request_fingerprint="batch_limit")
+                    state.register_expected(batch_id, {"kind": "sheet", "sheet_keys": targets})
+                    state.record_batch(batch_id=batch_id, kind="sheet", sheet_keys=targets,
+                                       page_nums=[obj.page_number], status="unresolved", error=str(exc))
+                continue
+            engine = str(obj.metadata.get("engine") or "pymupdf")
+            is_ocr = bool(obj.metadata.get("ocr_supplement") or obj.metadata.get("ocr_backend")) or engine not in {"pymupdf", "native", "kordoc"}
+            source = ("ocr_" if is_ocr else "") + ("table_object" if obj.object_type == "table" else "text_chunk")
+            obj.metadata["force_extract"] = True
+            for sheet_key in targets:
+                for chunk_index, text in enumerate(chunks, 1):
+                    key = hashlib.sha256(json.dumps(
+                        {"sheet": sheet_key, "text": text, "object_id": obj.object_id,
+                         "municipality": municipality,
+                         "prompt": extraction_prompts.get(sheet_key, ""),
+                         "schema_prompt": _SHEET_CONFIGS[sheet_key]["prompt"]},
+                        ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+                    if key in self._completed_object_chunks:
+                        self._record_extraction({"object_id": obj.object_id, "sheet_key": sheet_key,
+                                                        "chunk": chunk_index, "status": "reused",
+                                                        "reason": "identical object/chunk/sheet request already completed"})
+                        rows = self._object_chunk_results.get(key, [])
+                    else:
+                        rows = self._run_extraction_batch(sheet_key, text, municipality,
+                            extraction_prompts.get(sheet_key, ""), obj, source, [obj.page_number])
+                        if self.extraction_records[-1]["status"] == "ok":
+                            self._completed_object_chunks.add(key)
+                            self._object_chunk_results[key] = rows
+                    output[sheet_key] = self._merge_rows(sheet_key, output[sheet_key], rows)
+        return output
+
+    def _extract_native_batch(self, sheet_key, batch, municipality, guideline_prompt):
+        """Keep main batches by default; apply requested text/cell bounds when configured."""
+        cap = getattr(config, "MAX_BATCH_CHARS", None)
+        cell_cap = getattr(config, "MAX_BATCH_TABLE_CELLS", None)
+        if getattr(config, "EXTRACTION_OBJECT_BATCHING_ENABLED", False) or cap or cell_cap:
+            selected = [obj for obj in self.document_objects
+                        if obj.page_number in {page.page_number for page in batch}
+                        and obj.object_type in {"text", "table"} and (obj.rows or obj.text)]
+            tables = [obj for obj in selected if obj.object_type == "table" and obj.rows and obj.bbox]
+            def represented_by_table(obj):
+                if obj.object_type != "text" or not obj.bbox or not obj.text.strip():
+                    return False
+                text = re.sub(r"\s+", " ", obj.text).strip()
+                for table in tables:
+                    if table.page_number != obj.page_number:
+                        continue
+                    inside = (table.bbox[0] <= obj.bbox[0] and table.bbox[1] <= obj.bbox[1]
+                              and table.bbox[2] >= obj.bbox[2] and table.bbox[3] >= obj.bbox[3])
+                    cells = re.sub(r"\s+", " ", " ".join(str(cell) for row in table.rows for cell in row)).strip()
+                    if inside and text in cells:
+                        return True
+                return False
+            selected = [obj for obj in selected if not represented_by_table(obj)]
+            return self.extract_objects(selected, municipality, {sheet_key: guideline_prompt},
+                                        sheet_keys=[sheet_key])[sheet_key]
+        text = _build_page_text(batch)
+        pages = [page.page_number for page in batch]
+        oid = "batch-" + hashlib.sha256(text.encode()).hexdigest()[:20]
+        table_cells = 0
+        table_measurement_errors = []
+        for page in batch:
+            for html in page.tables:
+                try:
+                    table_cells += sum(len(row) for row in parse_html_table(html))
+                except ValueError as exc:
+                    table_measurement_errors.append({"page": page.page_number, "error": str(exc)})
+        obj = DocumentObject(oid, "text", pages[0], 1, text=text,
+                             metadata={"engine": "native", "evidence_id": f"ev-{oid}", "page_numbers": pages,
+                                       "source_table_cells": table_cells,
+                                       "table_measurement_errors": table_measurement_errors})
+        return self._run_extraction_batch(sheet_key, text, municipality, guideline_prompt,
+                                          obj, "text_chunk", pages)
 
     def extract(
         self,
@@ -487,8 +785,13 @@ class ExtractorAgent:
         municipality = self._extract_municipality_name(full_text)
         self._raw_results["municipality_name"] = municipality
         print(f"[에이전트2 텍스트추출] 지자체명: {municipality}")
+        self.document_objects, _removed = deduplicate_evidence_objects(build_document_objects(pages))
+        batch_size = max(1, int(batch_size))
 
         if getattr(config, "FULL_DOCUMENT_SCAN", False):
+            if config.SOURCE_COVERAGE_MODE == "audit":
+                self.coverage_routes = [{"sheet_key": key, "selected_pages": [p.page_number for p in pages],
+                                         "not_selected_pages": [], "policy": "full_scan"} for key in _SHEET_CONFIGS]
             print("[에이전트2 텍스트추출] 전체 문서 스캔 모드")
             batches = [pages[i:i + batch_size] for i in range(0, len(pages), batch_size)]
             for batch_num, batch in enumerate(batches, start=1):
@@ -497,8 +800,8 @@ class ExtractorAgent:
                 page_range = f"p{page_nums[0]}~{page_nums[-1]}" if len(page_nums) > 1 else f"p{page_nums[0]}"
                 for sheet_key in _SHEET_CONFIGS:
                     guideline_prompt = extraction_prompts.get(sheet_key, "")
-                    items = self._extract_sheet(sheet_key, batch_text, municipality, guideline_prompt)
-                    self._raw_results[sheet_key].extend(items)
+                    items = self._extract_native_batch(sheet_key, batch, municipality, guideline_prompt)
+                    self._raw_results[sheet_key] = self._merge_rows(sheet_key, self._raw_results[sheet_key], items)
                 print(f"  [full] 배치 {batch_num:>2}/{len(batches)} ({page_range}) 완료")
 
             total = {k: len(v) for k, v in self._raw_results.items() if isinstance(v, list)}
@@ -506,6 +809,12 @@ class ExtractorAgent:
             return self._raw_results
 
         routed_pages = _route_pages_by_sheet(pages)
+        if config.SOURCE_COVERAGE_MODE == "audit":
+            selected_numbers = {key: {p.page_number for p in routed_pages.get(key, [])} for key in _SHEET_CONFIGS}
+            self.coverage_routes = [{"sheet_key": key, "policy": "existing_page_routing",
+                "selected_pages": [p.page_number for p in routed_pages.get(key, [])],
+                "not_selected_pages": [p.page_number for p in pages if p.page_number not in selected_numbers[key]],
+                "no_call_reason": "not_selected_by_existing_route_threshold_context_or_cap"} for key in _SHEET_CONFIGS]
         route_summary = {k: len(v) for k, v in routed_pages.items() if v}
         print(f"[에이전트2 텍스트추출] 문서 구조 라우팅 완료: {route_summary}")
 
@@ -520,8 +829,8 @@ class ExtractorAgent:
                 page_nums = [p.page_number for p in batch]
                 page_range = f"p{page_nums[0]}~{page_nums[-1]}" if len(page_nums) > 1 else f"p{page_nums[0]}"
                 guideline_prompt = extraction_prompts.get(sheet_key, "")
-                items = self._extract_sheet(sheet_key, batch_text, municipality, guideline_prompt)
-                self._raw_results[sheet_key].extend(items)
+                items = self._extract_native_batch(sheet_key, batch, municipality, guideline_prompt)
+                self._raw_results[sheet_key] = self._merge_rows(sheet_key, self._raw_results[sheet_key], items)
                 status = f"{len(items)}건" if items else "추출 없음"
                 print(f"  [{sheet_key}] 배치 {batch_num:>2}/{len(batches)} ({page_range}): {status}")
 

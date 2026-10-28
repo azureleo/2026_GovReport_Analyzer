@@ -39,6 +39,13 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
 # LLM/로컬 에이전트 실행 설정
 #
 # 기본값은 Gemini API가 아니라 로컬 Codex CLI입니다. 필요하면 환경변수 또는
@@ -105,7 +112,7 @@ EXCEL_HEADERS = {
         "직간접구분", "연도", "배출량", "단위", "합계포함여부",
     ],
     "05_배출전망": [
-        "지자체명", "시나리오", "전망방법코드", "전망방법원문",
+        "지자체명", "전망범위", "시나리오", "전망방법코드", "전망방법원문",
         "부문", "세부부문", "연도", "전망값", "단위", "주요가정",
     ],
     "06_감축목표": [
@@ -279,3 +286,68 @@ MAX_IMAGE_SIZE = 1568
 # Vision이 유효 차트로 반환하지 못한 이미지 페이지에서 텍스트/표 기반 검토 후보를
 # 남기는 fallback 상한. 기본값은 없음(=발견한 후보 전부 기록).
 IMAGE_FALLBACK_MAX_OBSERVATIONS = _env_optional_int("IMAGE_FALLBACK_MAX_OBSERVATIONS", None)
+
+# main 기반 선별 통합. 모델/provider/reasoning 설정은 위의 기존 계약을 유지한다.
+# 객체 추출·OCR은 명시적으로 켜기 전에는 추가 모델 호출을 만들지 않는다.
+EXTRACTION_OBJECT_BATCHING_ENABLED = _env_bool("EXTRACTION_OBJECT_BATCHING_ENABLED", False)
+MAX_BATCH_CHARS = _env_optional_int("MAX_BATCH_CHARS", None)
+MAX_BATCH_TABLE_CELLS = _env_optional_int("MAX_BATCH_TABLE_CELLS", None)
+TABLE_OBJECT_ROWS_PER_CHUNK = _env_int("TABLE_OBJECT_ROWS_PER_CHUNK", 20)
+SELECTIVE_OCR_ENABLED = _env_bool("SELECTIVE_OCR_ENABLED", False)
+PHYSICAL_OBJECT_MERGE_ENABLED = _env_bool("PHYSICAL_OBJECT_MERGE_ENABLED", True)
+OCR_BACKEND = os.environ.get("OCR_BACKEND", "directory").strip().lower()
+OCR_RESULTS_DIR = os.environ.get("OCR_RESULTS_DIR", "").strip()
+OCR_NATIVE_CONFIDENCE_THRESHOLD = _env_float("OCR_NATIVE_CONFIDENCE_THRESHOLD", 0.78)
+OCR_OBJECT_MATCH_MIN_IOU = _env_float("OCR_OBJECT_MATCH_MIN_IOU", 0.55)
+OCR_ALLOW_LEGACY_UNLOCATED = _env_bool("OCR_ALLOW_LEGACY_UNLOCATED", False)
+OCR_REPLACE_MIN_CELLS = _env_int("OCR_REPLACE_MIN_CELLS", 2)
+OCR_REPLACE_CELL_RATIO = _env_float("OCR_REPLACE_CELL_RATIO", 1.10)
+OCR_COMPLEX_TABLE_ROWS = _env_int("OCR_COMPLEX_TABLE_ROWS", 45)
+OCR_COMPLEX_TABLE_COLUMNS = _env_int("OCR_COMPLEX_TABLE_COLUMNS", 12)
+OCR_RENDER_DPI = _env_int("OCR_RENDER_DPI", 200)
+OCR_RENDER_CACHE_ENABLED = _env_bool("OCR_RENDER_CACHE_ENABLED", True)
+OCR_SPATIAL_RECONSTRUCTION_ENABLED = _env_bool("OCR_SPATIAL_RECONSTRUCTION_ENABLED", True)
+OCR_FULL_PAGE_CONTEXT_ENABLED = _env_bool("OCR_FULL_PAGE_CONTEXT_ENABLED", False)
+OCR_FULL_PAGE_CONTEXT_MAX_OBJECT_RATIO = 0.15
+OCR_INDEX_CAPTION_MIN_COUNT = 5
+OCR_MULTI_PANEL_GAP = 24
+OCR_CAPTION_REGION_MAX_HEIGHT_RATIO = 0.20
+SEMANTIC_ROUTING_ENABLED = _env_bool("SEMANTIC_ROUTING_ENABLED", False)
+SEMANTIC_AUTO_RECLASSIFY = _env_bool("SEMANTIC_AUTO_RECLASSIFY", False)
+SEMANTIC_CONTRACT_GUARDS_ENABLED = _env_bool("SEMANTIC_CONTRACT_GUARDS_ENABLED", False)
+RUN_STATE_ENABLED = _env_bool("RUN_STATE_ENABLED", False)
+RUN_STATE_DIR = os.environ.get("RUN_STATE_DIR", ".cache/run_state").strip()
+EXTRACTION_RESUME = _env_bool("EXTRACTION_RESUME", False)
+EXTRACTION_RETRY_FAILED_ONLY = _env_bool("EXTRACTION_RETRY_FAILED_ONLY", False)
+# 원문 누락 후보 기록만 수행. 추출/라우팅/모델/업무 값은 변경하지 않는다.
+SOURCE_COVERAGE_MODE = os.environ.get("SOURCE_COVERAGE_MODE", "off").strip().lower()
+if SOURCE_COVERAGE_MODE not in {"off", "audit"}:
+    raise ValueError("SOURCE_COVERAGE_MODE must be off or audit")
+# 저장 후 진단만 수행한다. 기존 최소 구조 재시도/모델 설정은 바꾸지 않는다.
+QUALITY_REPORT_ENABLED = _env_bool("QUALITY_REPORT_ENABLED", True)
+EVALUATION_MODE = os.environ.get("EVALUATION_MODE", "auto").strip().lower()
+if EVALUATION_MODE not in {"auto", "off", "required"}:
+    raise ValueError("EVALUATION_MODE must be auto, off or required")
+EVALUATION_MANIFEST_PATH = os.environ.get("EVALUATION_MANIFEST_PATH", "").strip()
+EVALUATION_DATASET_ID = os.environ.get("EVALUATION_DATASET_ID", "").strip()
+ALLOW_DRAFT_EVALUATION = _env_bool("ALLOW_DRAFT_EVALUATION", False)
+EVALUATE_HOLDOUT = _env_bool("EVALUATE_HOLDOUT", False)
+PROVENANCE_ENABLED = _env_bool("PROVENANCE_ENABLED", True)
+INTERNAL_OBJECT_KEYS = {
+    "document_objects", "object_processing_states", "extraction_records", "merge_conflicts",
+    "ocr_import_audit", "ocr_reextraction_audit", "semantic_contract_review",
+    "_semantic_contract_quarantine", "_key_blank_stats", "reduction_target_context",
+    "source_validation", "vision_execution", "semantic_routing_report", "object_evidence_audit",
+    "source_coverage_snapshot",
+}
+PROVENANCE_HEADERS = ["출처페이지", "근거ID", "객체ID", "추출원천", "검수상태", "추출엔진", "OCR보완여부", "출처계보"]
+if PROVENANCE_ENABLED:
+    for _sheet_key in EXTRACTION_SHEETS:
+        for _header in PROVENANCE_HEADERS:
+            if _header not in EXCEL_HEADERS[SHEET_KEY_TO_NAME[_sheet_key]]:
+                EXCEL_HEADERS[SHEET_KEY_TO_NAME[_sheet_key]].append(_header)
+EXCEL_HEADERS["17_검증리포트"] = ["지자체명", "대상시트", "항목", "사유", "출처페이지", "감사파일"]
+SHEET_KEY_TO_NAME["validation_report"] = "17_검증리포트"
+for _header in ("객체ID", "근거ID", "출처페이지", "엔진", "처리상태", "본문반영행수"):
+    if _header not in EXCEL_HEADERS["16_시각자료목록"]:
+        EXCEL_HEADERS["16_시각자료목록"].append(_header)

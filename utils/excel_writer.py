@@ -5,6 +5,7 @@ carbon_guideline.md 기반 16개 시트 구조의 Excel 파일을 생성합니�
 """
 
 from pathlib import Path
+import json
 
 import openpyxl
 from openpyxl.styles import (
@@ -63,8 +64,15 @@ def _write_generic_sheet(ws, headers: list[str], data: list[dict]):
     for row_idx, row_data in enumerate(data, start=2):
         for col_idx, header in enumerate(headers, start=1):
             val = row_data.get(header, None)
+            if isinstance(val, (dict, list, tuple, set)):
+                val = json.dumps(list(val) if isinstance(val, set) else val, ensure_ascii=False, default=str)
             if isinstance(val, bool):
                 val = "Y" if val else "N"
+            if isinstance(val, str):
+                # Preserve source text without interpreting it as an Excel formula.
+                val = "".join(c for c in val if ord(c) >= 32 or c in "\n\r\t")[:32767]
+                if val.startswith(("=", "+", "-", "@")):
+                    val = "'" + val
             cell = ws.cell(row=row_idx, column=col_idx, value=val)
             cell.border = _thin_border()
             cell.alignment = Alignment(
@@ -92,6 +100,7 @@ def write_excel(extracted_data: dict, output_path: str | Path) -> Path:
         저장된 파일의 Path 객체
     """
     output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     wb = openpyxl.Workbook()
     del wb[wb.sheetnames[0]]

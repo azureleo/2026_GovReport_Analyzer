@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import re
+import time
 
 import config
 from utils.pdf_reader import PageContent
@@ -61,6 +62,15 @@ def _is_relevant_image(image: dict) -> bool:
     if w > 0 and h > 0 and (w / h > 5 or h / w > 5):
         return False
     return w >= 200 and h >= 150
+
+
+def _index_only_page(page: PageContent) -> bool:
+    """Exclude confirmed index render proxies, not mixed pages with real tables."""
+    lines = [line.strip() for line in (page.text or "").splitlines() if line.strip()]
+    heading = any(re.fullmatch(r"(?:표|그림)?\s*목\s*차", line) for line in lines)
+    entries = sum(bool(re.search(r"(?:표|그림).*?(?:\.{2,}|…|·{2,})\s*\d+\s*$", line)) for line in lines)
+    embedded = any("full render" not in str(image.get("caption", "")).lower() for image in page.images)
+    return heading and entries >= 5 and not page.tables and not embedded
 
 
 def _coverage_reduce_images(raw_images: list[tuple[PageContent, dict]]) -> list[tuple[PageContent, dict]]:
@@ -435,12 +445,25 @@ def _infer_chart_kind(item: dict, analysis: dict) -> str:
     return "현황"
 
 
+def _declared_scenario(item: dict, analysis: dict) -> str:
+    """Do not apply a mixed chart's BAU label to every series."""
+    if item.get("시나리오"):
+        return item["시나리오"]
+    title = str(analysis.get("title", ""))
+    bau = bool(re.search(r"\bBAU\b", title, re.I))
+    policy = any(token in title for token in ("정책반영", "정책 반영", "정책적용", "정책 적용"))
+    if bau != policy:
+        return "BAU" if bau else "정책반영"
+    return ""
+
+
 class ImageAgent:
     """에이전트 2-b: 이미지·그래프 분석 에이전트"""
 
     def __init__(self):
         self._image_results: list[dict] = []
         self._triage_stats: dict = {}
+        self._batch_input_reviews: list[dict] = []
 
     def _analyze_image(self, image: dict, page_num: int, municipality: str) -> dict | None:
         if config.IMAGE_CHART_TABLE_EXTRACTION:
@@ -458,6 +481,11 @@ class ImageAgent:
     {{
       "label": "부문 또는 계열명",
       "data_type": "현황|전망|목표",
+      "전망범위": "지역전체|관리권한|null",
+      "시나리오": "BAU|정책반영|추가조치|null",
+      "배출유형": "직접배출|간접배출|흡수원|null",
+      "직간접구분": "직접|간접|흡수|직접+간접|null",
+      "세부부문": "원문에 명시된 세부부문 또는 null",
       "values": {{"2018": 숫자, "2019": 숫자, ..., "2030": 숫자}}
     }}
   ],
@@ -481,7 +509,7 @@ class ImageAgent:
 이미지가 그래프/차트/표라면 DePlot 방식으로 다음 JSON 형식의 표 데이터로 변환하세요:
 {{
   "type": "chart_table|해당없음",
-  "target_sheet": "vehicle|energy|ghg|strategy|summary",
+  "target_sheet": "regional_conditions|emissions_regional|emissions_management|emissions_forecast|reduction_targets|mitigation_projects|financial_plan|vision_strategy",
   "chart_type": "막대|꺾은선|영역|원|표|복합|기타",
   "title": "그래프/표 제목",
   "unit": "단위 원문",
@@ -500,9 +528,11 @@ class ImageAgent:
   "confidence": "high|medium|low"
 }}
 
-온실가스 배출량/전망/목표 그래프라면 target_sheet는 ghg, 항목에는 건물, 수송, 폐기물, 기타, 합계 같은 부문명을 넣으세요.
-감축사업별 계획/실적/예산/감축량 표라면 target_sheet는 strategy로 두고 fields에 사업명과 부문을 넣으세요.
-차량 등록대수/주행거리 표라면 target_sheet는 vehicle, 에너지 소비량 표라면 target_sheet는 energy로 두세요.
+온실가스 현황/전망/목표는 emissions_regional 또는 emissions_management / emissions_forecast / reduction_targets로 구분하고, 항목에는 부문명을 넣으세요.
+전망 fields에는 전망범위·시나리오·세부부문을 원문대로 보존하세요. 혼합 BAU·정책반영 제목으로 개별 행을 BAU로 고정하지 마세요. 미확정 값은 null로 두세요.
+현황 fields에는 원문에 명시된 배출유형(03) 또는 직간접구분·관리부문(04)을 보존하세요.
+감축사업 표는 mitigation_projects, 예산 표는 financial_plan으로 구분하고 fields에 사업명과 부문을 넣으세요.
+차량 등록대수/주행거리 및 에너지 소비량 표는 regional_conditions로 두세요.
 이미지에 숫자축만 있고 정확한 값을 읽기 어려우면 대략값을 만들지 말고 null로 반환하세요."""
 
         resp = llm_client.call_vision(image["base64"], prompt, system=CHART_TABLE_SYSTEM)
@@ -552,7 +582,7 @@ class ImageAgent:
       "image_index": 1,
       "page_number": 123,
       "type": "chart_table|해당없음",
-      "target_sheet": "vehicle|energy|ghg|strategy|summary",
+      "target_sheet": "regional_conditions|emissions_regional|emissions_management|emissions_forecast|reduction_targets|mitigation_projects|financial_plan|vision_strategy",
       "chart_type": "막대|꺾은선|영역|원|표|복합|기타",
       "title": "그래프/표 제목",
       "unit": "단위 원문",
@@ -574,6 +604,8 @@ class ImageAgent:
 
 규칙:
 - analyses에는 반드시 모든 image_index를 한 번씩 포함하세요.
+- 전망 행의 fields에는 전망범위·시나리오·세부부문을 원문대로 구분하세요. 여러 시나리오가 있는 제목만으로 개별 행을 BAU로 고정하지 마세요. 확인되지 않은 값은 null로 두세요.
+- 현황 행의 배출유형(03) 또는 직간접구분·관리부문(04)은 원문에 명시된 경우 fields에 보존하세요. 목표 행은 전망과 분리하세요.
 - 이미지에 숫자축만 있고 정확한 값을 읽기 어려우면 값을 추정하지 말고 null로 반환하세요.
 - 표/그래프가 아니거나 지자체 직접 데이터가 아니면 type은 "해당없음"으로 두세요.
 - 반드시 JSON만 반환하세요."""
@@ -583,21 +615,40 @@ class ImageAgent:
         parsed = llm_client.parse_json(response)
         raw_analyses = parsed.get("analyses", []) if isinstance(parsed, dict) else parsed
         if not isinstance(raw_analyses, list):
+            self._batch_input_reviews.append({"code": "invalid_batch_response", "message": "analyses must be a list"})
             return []
 
         results: list[dict] = []
         page_by_index = {idx: page.page_number for idx, (page, _) in enumerate(batch, start=1)}
+        indexed = {}
         for raw in raw_analyses:
-            if not isinstance(raw, dict) or raw.get("type") == "해당없음":
-                continue
-            table = raw.get("table", [])
-            if not isinstance(table, list) or not table:
+            if not isinstance(raw, dict):
+                self._batch_input_reviews.append({"code": "invalid_analysis", "value": raw})
                 continue
             try:
                 image_index = int(raw.get("image_index"))
             except (TypeError, ValueError):
                 image_index = 0
-            page_number = page_by_index.get(image_index) or raw.get("page_number")
+            if image_index not in page_by_index:
+                self._batch_input_reviews.append({"code": "invalid_image_index", "image_index": image_index})
+                continue
+            indexed.setdefault(image_index, []).append(raw)
+        for missing in sorted(set(page_by_index) - set(indexed)):
+            self._batch_input_reviews.append({"code": "missing_image_result", "image_index": missing})
+        for image_index, records in indexed.items():
+            if len(records) != 1:
+                self._batch_input_reviews.append({"code": "duplicate_image_result", "image_index": image_index, "records": records})
+                continue
+            raw = records[0]
+            if raw.get("type") == "해당없음":
+                continue
+            table = raw.get("table", [])
+            if not isinstance(table, list):
+                self._batch_input_reviews.append({"code": "invalid_chart_table", "image_index": image_index})
+                continue
+            if not table:
+                continue
+            page_number = page_by_index[image_index]
             raw["type"] = "chart_table"
             raw["page_number"] = page_number
             raw["municipality"] = municipality
@@ -718,6 +769,7 @@ class ImageAgent:
 
     def _merge_image_results(self, text_results: dict, analyses: list[dict], municipality: str) -> dict:
         existing_ghg = text_results.setdefault("emissions_regional", [])
+        existing_management = text_results.setdefault("emissions_management", [])
         existing_regional = text_results.setdefault("regional_conditions", [])
         existing_projects = text_results.setdefault("mitigation_projects", [])
         existing_forecast = text_results.setdefault("emissions_forecast", [])
@@ -725,17 +777,24 @@ class ImageAgent:
         existing_financial = text_results.setdefault("financial_plan", [])
 
         for analysis in analyses:
+            before_counts = {key: len(text_results.get(key, [])) for key in config.EXTRACTION_SHEETS}
             chart_rows = analysis.get("table", []) if analysis.get("type") == "chart_table" else []
-            target_sheet = self._infer_target_sheet(analysis)
+            chart_target = self._infer_target_sheet(analysis)
             if isinstance(chart_rows, list):
                 for item in chart_rows:
                     if not isinstance(item, dict):
                         continue
                     fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
                     merged_item = {**fields, **item}
-                    can_merge, final_confidence, merge_reasons = self._chart_merge_decision(analysis, item, target_sheet)
+                    target_sheet = chart_target
+                    if chart_target in {"emissions_regional", "emissions_management", "emissions_forecast", "reduction_targets"}:
+                        explicit_kind = merged_item.get("종류")
+                        if explicit_kind in {"현황", "전망", "목표"}:
+                            target_sheet = {"현황": "emissions_management" if chart_target == "emissions_management" else "emissions_regional",
+                                            "전망": "emissions_forecast", "목표": "reduction_targets"}[explicit_kind]
+                    can_merge, final_confidence, merge_reasons = self._chart_merge_decision(analysis, merged_item, target_sheet)
                     self._append_chart_observation(
-                        text_results, analysis, item, target_sheet,
+                        text_results, analysis, merged_item, target_sheet,
                         can_merge, final_confidence, merge_reasons
                     )
 
@@ -747,7 +806,7 @@ class ImageAgent:
                     if target_sheet == "regional_conditions":
                         # 자동차/에너지 등 지역여건 데이터
                         year_int = _chart_year_int(merged_item.get("연도"))
-                        val = _parse_chart_value(merged_item.get("값") or merged_item.get("대수"))
+                        val = _parse_chart_value(merged_item.get("값") if merged_item.get("값") is not None else merged_item.get("대수"))
                         existing_regional.append({
                             "지자체명": municipality,
                             "지표범주": "에너지" if any(k in str(merged_item) for k in ["에너지", "전력", "가스"]) else "인문사회",
@@ -793,62 +852,121 @@ class ImageAgent:
                         continue
 
                     # 기본: emissions_regional (온실가스 배출 데이터)
-                    year = item.get("연도")
-                    value = item.get("값")
+                    year = merged_item.get("연도")
+                    value = merged_item.get("값")
                     if year is None or value is None:
                         continue
                     year_int = _chart_year_int(year)
                     if year_int is None:
                         continue
-                    kind = _infer_chart_kind(item, analysis)
-                    label = item.get("항목") or analysis.get("title") or "기타"
-                    unit = item.get("단위") or analysis.get("unit")
+                    kind = _infer_chart_kind(merged_item, analysis)
+                    explicit_kind = merged_item.get("종류") in {"현황", "전망", "목표"}
+                    row_target = ({"현황": "emissions_management" if target_sheet == "emissions_management" else "emissions_regional",
+                                   "전망": "emissions_forecast", "목표": "reduction_targets"}[kind]
+                                  if explicit_kind else target_sheet)
+                    label = merged_item.get("항목") or analysis.get("title") or "기타"
+                    unit = merged_item.get("단위") or analysis.get("unit")
                     numeric = _parse_chart_value(value, unit)
                     if numeric is None:
+                        continue
+
+                    if row_target == "emissions_forecast" or (not explicit_kind and kind == "전망"):
+                        scenario = _declared_scenario(merged_item, analysis)
+                        existing_forecast.append({"지자체명": municipality,
+                            "전망범위": merged_item.get("전망범위", ""), "시나리오": scenario,
+                            "부문": label, "세부부문": merged_item.get("세부부문", ""),
+                            "연도": year_int, "전망값": numeric, "단위": unit or ""})
+                        continue
+                    if row_target == "reduction_targets" or (not explicit_kind and kind == "목표"):
+                        existing_targets.append({"지자체명": municipality, "목표수준": merged_item.get("목표수준", ""),
+                            "목표범위": merged_item.get("목표범위", ""), "부문": label,
+                            "목표연도": year_int, "목표배출량": numeric, "단위": unit or ""})
+                        continue
+
+                    if row_target == "emissions_management":
+                        existing_management.append({"지자체명": municipality,
+                            "인벤토리출처": "이미지", "관리부문": merged_item.get("관리부문") or label,
+                            "직간접구분": merged_item.get("직간접구분", ""),
+                            "세부부문": merged_item.get("세부부문", ""), "연도": year_int,
+                            "배출량": numeric, "단위": unit or ""})
                         continue
 
                     existing_ghg.append({
                         "지자체명": municipality,
                         "인벤토리출처": "이미지",
-                        "배출범위": "직접배출",
-                        "배출유형": "직접배출",
+                        "배출범위": merged_item.get("배출범위", ""),
+                        "배출유형": merged_item.get("배출유형", ""),
                         "부문": label,
-                        "세부부문": "",
+                        "세부부문": merged_item.get("세부부문", ""),
                         "연도": year_int,
                         "배출량": numeric,
-                        "단위": unit or "tCO2eq",
+                        "단위": unit or "",
                         "흡수원여부": False,
                     })
 
             for series in analysis.get("ghg_data", []):
+                if not isinstance(series, dict):
+                    continue
                 label = series.get("label", "")
-                data_type = series.get("data_type", "현황")
+                data_type = series.get("data_type", "")
                 values = series.get("values", {})
-                if not values:
+                if not isinstance(values, dict) or not values:
                     continue
 
                 for year, val in values.items():
                     year_int = _chart_year_int(year)
                     if year_int is None:
                         continue
-                    try:
-                        numeric = float(str(val).replace(",", "").replace("약 ", ""))
-                    except (ValueError, TypeError):
+                    unit = series.get("단위") or series.get("unit") or analysis.get("unit") or ""
+                    numeric = _parse_chart_value(val, unit)
+                    if numeric is None:
+                        continue
+                    if data_type == "전망":
+                        existing_forecast.append({"지자체명": municipality,
+                            "전망범위": series.get("전망범위", ""), "시나리오": _declared_scenario(series, analysis),
+                            "부문": label, "세부부문": series.get("세부부문", ""),
+                            "연도": year_int, "전망값": numeric, "단위": unit})
+                        continue
+                    if data_type == "목표":
+                        existing_targets.append({"지자체명": municipality, "목표수준": series.get("목표수준", ""),
+                            "목표범위": series.get("목표범위", ""), "부문": label,
+                            "목표연도": year_int, "목표배출량": numeric, "단위": unit})
+                        continue
+                    if chart_target == "emissions_management":
+                        existing_management.append({"지자체명": municipality,
+                            "인벤토리출처": "이미지", "관리부문": series.get("관리부문") or label,
+                            "직간접구분": series.get("직간접구분", ""),
+                            "세부부문": series.get("세부부문", ""), "연도": year_int,
+                            "배출량": numeric, "단위": unit})
                         continue
                     existing_ghg.append({
                         "지자체명": municipality,
                         "인벤토리출처": "이미지",
-                        "배출범위": "직접배출",
-                        "배출유형": "직접배출",
+                        "배출범위": series.get("배출범위", ""),
+                        "배출유형": series.get("배출유형", ""),
                         "부문": label,
-                        "세부부문": "",
+                        "세부부문": series.get("세부부문", ""),
                         "연도": year_int,
                         "배출량": numeric,
-                        "단위": "tCO2eq",
+                        "단위": unit,
                         "흡수원여부": False,
                     })
 
+            from utils.evidence_merge import merge_extraction_rows
+            for key, count in before_counts.items():
+                rows = text_results.get(key, [])
+                incoming = rows[count:]
+                for row in incoming:
+                    row.setdefault("출처페이지", analysis.get("page_number"))
+                    row.setdefault("근거ID", analysis.get("evidence_id") or f"vision-p{analysis.get('page_number')}-i{analysis.get('image_index', 1)}")
+                    row.setdefault("객체ID", analysis.get("object_id") or row["근거ID"])
+                    row.setdefault("추출원천", "visual")
+                if incoming:
+                    rows[:] = merge_extraction_rows(key, rows[:count], incoming,
+                                                    text_results.setdefault("merge_conflicts", []))
+
         text_results["emissions_regional"] = existing_ghg
+        text_results["emissions_management"] = existing_management
         text_results["regional_conditions"] = existing_regional
         text_results["mitigation_projects"] = existing_projects
         text_results["emissions_forecast"] = existing_forecast
@@ -857,11 +975,13 @@ class ImageAgent:
         return text_results
 
     def extract(self, pages: list[PageContent], text_results: dict, municipality: str) -> dict:
+        started = time.perf_counter()
+        index_pages = {p.page_number for p in pages if _index_only_page(p)}
         raw_images = [
             (p, img)
             for p in pages
             for img in p.images
-            if _is_relevant_image(img)
+            if _is_relevant_image(img) and p.page_number not in index_pages
         ]
         coverage_images = _coverage_reduce_images(raw_images)
         if len(coverage_images) != len(raw_images):
@@ -928,10 +1048,21 @@ class ImageAgent:
             print("[에이전트2b 이미지분석] 이미지 분석 상한 없음: 후보 전수 분석")
 
         total = len(pages_with_images)
+        self._triage_stats["index_pages_excluded"] = sorted(index_pages)
+        self._triage_stats["render_variants"] = {
+            "full_page": sum("full render" in str(image.get("caption", "")).lower() for _, image in pages_with_images),
+            "embedded": sum("full render" not in str(image.get("caption", "")).lower() for _, image in pages_with_images),
+        }
+        self._triage_stats["scheduled_batches"] = 0
+        self._triage_stats["completed_batches"] = 0
+        self._triage_stats["partial_batches"] = 0
+        self._triage_stats["failed_batches"] = []
         print(f"[에이전트2b 이미지분석] 분석 대상 이미지: {total}개")
 
         if total == 0:
             print("[에이전트2b 이미지분석] 분석할 이미지 없음.")
+            self._triage_stats["elapsed_seconds"] = time.perf_counter() - started
+            text_results["vision_execution"] = dict(self._triage_stats)
             return text_results
 
         analyses = []
@@ -941,6 +1072,7 @@ class ImageAgent:
             for i in range(0, len(pages_with_images), batch_size)
         ]
         processed = 0
+        self._triage_stats["scheduled_batches"] = len(image_batches)
         for batch_num, image_batch in enumerate(image_batches, start=1):
             processed += len(image_batch)
             page_nums = [page.page_number for page, _ in image_batch]
@@ -948,15 +1080,27 @@ class ImageAgent:
                 f"[에이전트2b 이미지분석] 배치 {batch_num}/{len(image_batches)} "
                 f"(누적 {processed}/{total}, 페이지 {page_nums[0]}~{page_nums[-1]}) 분석 중..."
             )
-            if config.IMAGE_CHART_TABLE_EXTRACTION:
-                batch_results = self._chart_to_table_batch(image_batch, municipality)
-            else:
-                batch_results = []
-                for page, image in image_batch:
-                    result = self._analyze_image(image, page.page_number, municipality)
-                    if result:
-                        batch_results.append(result)
+            try:
+                self._batch_input_reviews = []
+                if config.IMAGE_CHART_TABLE_EXTRACTION:
+                    batch_results = self._chart_to_table_batch(image_batch, municipality)
+                else:
+                    batch_results = []
+                    for page, image in image_batch:
+                        result = self._analyze_image(image, page.page_number, municipality)
+                        if result:
+                            batch_results.append(result)
+            except Exception as error:
+                self._triage_stats["failed_batches"].append({"batch": batch_num, "pages": page_nums, "error": str(error)})
+                print(f"[Vision 경고] 배치 실패, 이전 성공 결과 유지: {error}")
+                continue
             analyses.extend(batch_results)
+            if self._batch_input_reviews:
+                self._triage_stats["partial_batches"] += 1
+                self._triage_stats["failed_batches"].append({"batch": batch_num, "pages": page_nums,
+                    "error": "시각 배치 응답 일부 미완료", "status": "partial", "diagnostics": self._batch_input_reviews})
+            else:
+                self._triage_stats["completed_batches"] += 1
             if batch_results:
                 titles = ", ".join(str(r.get("title", "제목없음"))[:30] for r in batch_results[:3])
                 print(f"  → 유효 {len(batch_results)}건: {titles}")
@@ -990,6 +1134,8 @@ class ImageAgent:
                 f"페이지 렌더/표 주변 텍스트 기반 검토 후보 {fallback_count}건 보존"
             )
 
+        self._triage_stats["elapsed_seconds"] = time.perf_counter() - started
+        merged_results["vision_execution"] = dict(self._triage_stats)
         return merged_results
 
     def report(self) -> str:

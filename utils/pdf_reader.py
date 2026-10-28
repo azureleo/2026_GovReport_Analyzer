@@ -10,7 +10,7 @@ import io
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import fitz  # PyMuPDF
 fitz.TOOLS.mupdf_display_errors(False)   # MuPDF C라이브러리 노이즈 억제 (파싱에 영향 없음)
@@ -26,6 +26,11 @@ class PageContent:
     text: str
     tables: list[str]          # HTML 문자열 리스트
     images: list[dict]         # {"base64": str, "width": int, "height": int, "caption": str}
+    text_blocks: list[dict[str, Any]] = field(default_factory=list)
+    table_records: list[dict[str, Any]] = field(default_factory=list)
+    width: float = 0.0
+    height: float = 0.0
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -34,6 +39,7 @@ class PDFContent:
     total_pages: int
     pages: list[PageContent]
     full_text: str             # 전체 텍스트 (페이지 구분자 포함)
+    source_path: str = ""
 
 
 def _resize_image(pil_img: Image.Image, max_size: int = config.MAX_IMAGE_SIZE) -> Image.Image:
@@ -52,21 +58,51 @@ def _image_to_base64(pil_img: Image.Image) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def _extract_tables_from_page(page: fitz.Page) -> list[str]:
+def _extract_table_records_from_page(page: fitz.Page) -> list[dict]:
     """
     PyMuPDF의 find_tables()를 사용해 페이지 내 표를 HTML 문자열 리스트로 반환.
     표가 없으면 빈 리스트 반환.
     """
     tables = []
+    original_rotation = int(getattr(page, "rotation", 0) or 0)
     try:
+        if original_rotation:
+            # find_tables can transpose a rotated page; objects use the same
+            # unrotated PDF space as get_text blocks and OCR derotation.
+            page.set_rotation(0)
         tab_finder = page.find_tables()
-        for tab in tab_finder.tables:
+        for index, tab in enumerate(tab_finder.tables, 1):
             df = tab.to_pandas()
             html = df.to_html(index=False, border=1, na_rep="")
-            tables.append(html)
+            tables.append({
+                "html": html, "table_index": index,
+                "bbox": list(tab.bbox), "row_count": len(df) + 1,
+                "column_count": len(df.columns), "engine": "pymupdf",
+            })
     except Exception:
         pass
+    finally:
+        if original_rotation:
+            page.set_rotation(original_rotation)
     return tables
+
+
+def _extract_tables_from_page(page: fitz.Page) -> list[str]:
+    """Keep the original HTML-only API alongside object metadata."""
+    return [record["html"] for record in _extract_table_records_from_page(page)]
+
+
+def _extract_text_blocks(page: fitz.Page) -> list[dict]:
+    blocks = []
+    try:
+        raw_blocks = page.get_text("blocks", sort=True)
+    except Exception:
+        return blocks
+    for block in raw_blocks:
+        if len(block) >= 5 and (len(block) < 7 or block[6] == 0):
+            blocks.append({"text": str(block[4]), "bbox": list(block[:4]),
+                           "block_id": block[5] if len(block) > 5 else len(blocks)})
+    return blocks
 
 
 def _extract_images_from_page(
@@ -100,11 +136,18 @@ def _extract_images_from_page(
 
             pil_img = _resize_image(pil_img)
             b64 = _image_to_base64(pil_img)
+            try:
+                placements = page.get_image_rects(xref)
+            except Exception:
+                placements = []
             result.append({
                 "base64": b64,
                 "width": pil_img.width,
                 "height": pil_img.height,
                 "caption": "",
+                "bbox": list(placements[0]) if placements else None,
+                "xref": xref,
+                "source_kind": "embedded",
             })
         except Exception:
             continue
@@ -125,6 +168,8 @@ def _render_page_as_image(page: fitz.Page) -> dict:
         "width": pil_img.width,
         "height": pil_img.height,
         "caption": f"Page {page.number + 1} full render",
+        "bbox": list(page.rect),
+        "source_kind": "page_render",
     }
 
 
@@ -166,7 +211,8 @@ def extract_pdf(
         all_texts.append(f"[페이지 {page_num + 1}]\n{text}")
 
         # 표 추출
-        tables = _extract_tables_from_page(page)
+        table_records = _extract_table_records_from_page(page)
+        tables = [record["html"] for record in table_records]
 
         # 이미지 추출 (embedded images)
         images = _extract_images_from_page(page, doc)
@@ -182,6 +228,13 @@ def extract_pdf(
             text=text,
             tables=tables,
             images=images,
+            text_blocks=_extract_text_blocks(page),
+            table_records=table_records,
+            width=float(page.rect.width), height=float(page.rect.height),
+            metadata={"rotation": int(page.rotation), "native_text_chars": len(text.strip()),
+                      "unrotated_width": float(page.cropbox.width),
+                      "unrotated_height": float(page.cropbox.height),
+                      "coordinate_space": "pdf_points_unrotated"},
         ))
 
     doc.close()
@@ -190,6 +243,7 @@ def extract_pdf(
         total_pages=len(pages),
         pages=pages,
         full_text="\n\n".join(all_texts),
+        source_path=str(pdf_path.resolve()),
     )
 
 

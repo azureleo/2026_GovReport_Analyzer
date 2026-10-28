@@ -62,6 +62,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
+    parser.add_argument("--quality-report", choices=["on", "off"], help="저장 후 규칙 진단 (모델 추가 호출 없음)")
+    parser.add_argument("--evaluation-mode", choices=["auto", "off", "required"], help="승인 골든 평가 정책")
+    parser.add_argument("--evaluate", action="store_true", help="골든 평가 required 모드 (Excel/기존 종료 코드 보존)")
+    parser.add_argument("--evaluation-manifest", help="골든 등록 JSON 경로")
+    parser.add_argument("--evaluation-dataset", help="등록 데이터셋 ID (원문 SHA도 일치해야 함)")
+    parser.add_argument("--allow-draft-evaluation", action="store_true", help="검토 전 draft 골든 사용 명시 허용")
+    parser.add_argument("--evaluate-holdout", action="store_true", help="holdout 평가 명시 허용")
     parser.add_argument(
         "input_path",
         help="입력 문서 파일 경로 (PDF, HWP, HWPX 지원)",
@@ -126,6 +133,15 @@ def main():
         help="시트별 키워드 라우팅/상한에 의존하지 않고 전체 페이지를 추출 후보로 사용",
     )
 
+    parser.add_argument("--selective-ocr", action="store_true", help="저장된 OCR의 변경 객체만 관련 시트로 재추출 (서버 자동 호출 없음)")
+    parser.add_argument("--ocr-results-dir", help="사전 생성 OCR Markdown/TXT/JSONL 디렉터리")
+    parser.add_argument("--object-batching", action="store_true", help="표/텍스트 객체 청킹 활성화 (복수 헤더 반복)")
+    parser.add_argument("--batch-max-chars", type=int, help="추출 입력 문자 상한; 0이면 제한 없음")
+    parser.add_argument("--batch-max-table-cells", type=int, help="표 셀 상한; 0이면 제한 없음")
+    parser.add_argument("--semantic-routing", choices=["audit", "apply"], help="시트 의미 진단만 또는 근거 있는 전망 행 이동")
+    parser.add_argument("--run-state-dir", help="선택적 체크포인트 저장 디렉터리")
+    parser.add_argument("--resume", action="store_true", help="동일 입력/설정/구현의 성공 배치만 복원")
+    parser.add_argument("--source-coverage", choices=["off", "audit"], help="원문 항목과 최종 저장 셀의 누락 후보 감사만 수행 (추가 모델 호출 없음)")
     args = parser.parse_args()
 
     setup_logging(args.verbose)
@@ -146,6 +162,32 @@ def main():
     if args.full_scan:
         os.environ["FULL_DOCUMENT_SCAN"] = "1"
         os.environ.setdefault("MAX_IMAGES", "0")
+    if args.selective_ocr:
+        os.environ["SELECTIVE_OCR_ENABLED"] = "1"
+    if args.ocr_results_dir:
+        if not Path(args.ocr_results_dir).is_dir():
+            parser.error("OCR 결과 디렉터리가 없습니다.")
+        os.environ["OCR_RESULTS_DIR"] = str(Path(args.ocr_results_dir).resolve())
+        os.environ["OCR_BACKEND"] = "directory"
+    if args.object_batching:
+        os.environ["EXTRACTION_OBJECT_BATCHING_ENABLED"] = "1"
+    for value, name in ((args.batch_max_chars, "MAX_BATCH_CHARS"),
+                        (args.batch_max_table_cells, "MAX_BATCH_TABLE_CELLS")):
+        if value is not None:
+            if value < 0:
+                parser.error(f"{name}은 0 이상의 정수여야 합니다.")
+            os.environ[name] = str(value)
+    if args.semantic_routing:
+        os.environ["SEMANTIC_ROUTING_ENABLED"] = "1"
+        os.environ["SEMANTIC_AUTO_RECLASSIFY"] = "1" if args.semantic_routing == "apply" else "0"
+    if args.run_state_dir:
+        os.environ["RUN_STATE_ENABLED"] = "1"
+        os.environ["RUN_STATE_DIR"] = str(Path(args.run_state_dir).resolve())
+    if args.resume:
+        os.environ["RUN_STATE_ENABLED"] = "1"
+        os.environ["EXTRACTION_RESUME"] = "1"
+    if args.source_coverage:
+        os.environ["SOURCE_COVERAGE_MODE"] = args.source_coverage
 
     # 레거시 Gemini API 키 설정
     if args.api_key:
@@ -158,6 +200,20 @@ def main():
         print("  방법 2: 환경변수 GEMINI_API_KEY 설정")
         print("  또는 API 없이 실행하려면 --agent codex / --agent claude를 사용하세요.")
         sys.exit(1)
+
+    # config/Supervisor를 가져오기 전에 적용한다. 모델/provider/reasoning은 변경하지 않는다.
+    if args.quality_report:
+        os.environ["QUALITY_REPORT_ENABLED"] = "1" if args.quality_report == "on" else "0"
+    if args.evaluation_mode or args.evaluate:
+        os.environ["EVALUATION_MODE"] = "required" if args.evaluate else args.evaluation_mode
+    if args.evaluation_manifest:
+        os.environ["EVALUATION_MANIFEST_PATH"] = str(Path(args.evaluation_manifest).resolve())
+    if args.evaluation_dataset:
+        os.environ["EVALUATION_DATASET_ID"] = args.evaluation_dataset
+    if args.allow_draft_evaluation:
+        os.environ["ALLOW_DRAFT_EVALUATION"] = "1"
+    if args.evaluate_holdout:
+        os.environ["EVALUATE_HOLDOUT"] = "1"
 
     # 입력 파일 존재 확인
     input_path = Path(args.input_path)

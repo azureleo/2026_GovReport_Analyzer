@@ -23,3 +23,11 @@ npm-debug.log*
 16guide.md
 excel_source_verification*.json
 *.hwp
+
+# 통합 검증 산출물과 로컬 체크포인트 (코드·fixture만 버전 관리)
+.pytest_*/
+.cache/
+output/
+baseline_main*.xml
+integration_tests*.xml
+.test_tmp/
