@@ -141,7 +141,8 @@ def persist_audit(output_path, input_path, data, context):
     annotations = []
     for sheet, row in body_rows(data):
         notes = {k: row[k] for k in ("_axis_original", "_axis_validation", "_forecast_scope_review",
-                                    "_merge_conflict", "_forecast_routing_review") if k in row}
+                                    "_merge_conflict", "_forecast_routing_review", "_fact_contract",
+                                    "_fact_cells", "_fact_cell_aliases") if k in row}
         if notes:
             annotations.append({"sheet": sheet, "row": row, "annotations": notes})
     ledgers["row_contract_annotations"] = annotations

@@ -194,6 +194,13 @@ def _merge_row_evidence(target: dict, source: dict) -> None:
 
 def _contract_dedup(rows: list[dict], key_fields: list[str], value_field: str) -> list[dict]:
     """Keep value conflicts and axis-invalid rows separate; merge only equal facts."""
+    # Preserve every identity axis in the experimental contract. Legacy cleaners
+    # otherwise group rows before the common gate can see their differences.
+    from utils.fact_contracts import mode, merge_rows
+    if mode() == "enforce":
+        sheet = "emissions_forecast" if value_field == "전망값" else (
+            "emissions_management" if "관리부문" in key_fields else "emissions_regional")
+        return merge_rows(sheet, [], rows)
     seen: dict[tuple, list[dict]] = {}
     ordered = sorted(rows, key=lambda row: json.dumps(row, ensure_ascii=False, sort_keys=True, default=str))
     for row in ordered:
@@ -224,6 +231,9 @@ def _contract_dedup(rows: list[dict], key_fields: list[str], value_field: str) -
 
 def deduplicate_forecast_rows(rows: list[dict]) -> list[dict]:
     """Resolve blank scopes from all candidates at once, independent of input order."""
+    from utils.fact_contracts import mode, merge_rows
+    if mode() == "enforce":
+        return merge_rows("emissions_forecast", [], rows)
     fields = ["지자체명", "전망범위", "시나리오", "부문", "세부부문", "연도", "단위"]
     rows = _contract_dedup(rows, fields, "전망값")
     known = [row for row in rows if row.get("전망범위") in {"지역전체", "관리권한"}]
@@ -341,6 +351,9 @@ def _normalize_sector(val: str) -> str:
 
 
 def _deduplicate_rows(rows: list[dict], key_fields: list[str]) -> list[dict]:
+    from utils.fact_contracts import mode, merge_rows
+    if mode() == "enforce" and "지표명" in key_fields:
+        return merge_rows("regional_conditions", [], rows)
     seen: dict[tuple, dict] = {}
     for row in rows:
         key = tuple(str(row.get(f, "")).strip() for f in key_fields)
@@ -559,6 +572,12 @@ class OrganizerAgent:
 
     def organize(self, raw_data: dict, full_text_excerpt: str = "") -> dict:
         print("[에이전트3 정리] 정제 시작...")
+        from utils.fact_contracts import apply_contracts, mode
+        if mode() == "enforce":
+            # Validate before cleaners turn invalid strings into null or discard
+            # rows. Original rejected proposals survive in the contract ledger.
+            raw_data = deepcopy(raw_data)
+            apply_contracts(raw_data, stage="pre_clean")
         municipality = raw_data.get("municipality_name", "알 수 없음")
 
         cleaned: dict = {"municipality_name": municipality}
@@ -630,6 +649,8 @@ class OrganizerAgent:
             json.dumps(record, ensure_ascii=False, sort_keys=True, default=str): record
             for record in all_quarantine
         }.values())
+
+        apply_contracts(cleaned, stage="post_clean")
 
         counts = {k: len(v) for k, v in cleaned.items() if isinstance(v, list) and v}
         print(f"[에이전트3 정리] 정제 완료: {counts}")

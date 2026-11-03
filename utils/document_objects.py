@@ -128,7 +128,11 @@ class _HTMLTableParser(HTMLParser):
             self._thead = False
 
     def expanded_rows(self):
+        return self.expanded_layout()[0]
+
+    def expanded_layout(self):
         cells = {}
+        locators = []
         width = 0
         for r, row in enumerate(self.raw_rows):
             col = 0
@@ -143,22 +147,31 @@ class _HTMLTableParser(HTMLParser):
                         if (rr, cc) in cells:
                             raise ValueError("overlapping table spans")
                         cells[rr, cc] = value
+                        if rowspan > 1 or colspan > 1:
+                            locators.append({"row": rr + 1, "column": cc + 1,
+                                             "origin_row": r + 1, "origin_column": col + 1,
+                                             "rowspan": rowspan, "colspan": colspan})
                 col += colspan
                 width = max(width, col)
         height = max((r + 1 for r, _ in cells), default=0)
-        return [[cells.get((r, c), "") for c in range(width)] for r in range(height)]
+        return [[cells.get((r, c), "") for c in range(width)] for r in range(height)], {"cells": locators}
 
 
 def parse_html_table_structure(table_html: str) -> tuple[list[list[str]], int]:
+    rows, headers, _ = parse_html_table_layout(table_html)
+    return rows, headers
+
+
+def parse_html_table_layout(table_html: str):
     parser = _HTMLTableParser()
     parser.feed(table_html or "")
-    rows = parser.expanded_rows()
+    rows, layout = parser.expanded_layout()
     headers = 0
     for flag in parser.header_flags:
         if not flag:
             break
         headers += 1
-    return rows, min(headers, len(rows))
+    return rows, min(headers, len(rows)), layout
 
 
 def parse_html_table(table_html: str) -> list[list[str]]:
@@ -240,9 +253,9 @@ def build_document_objects(pages: list[PageContent]) -> list[DocumentObject]:
         for index, record in enumerate(records, 1):
             parse_error = ""
             try:
-                rows, explicit_headers = parse_html_table_structure(str(record.get("html") or ""))
+                rows, explicit_headers, layout = parse_html_table_layout(str(record.get("html") or ""))
             except ValueError as exc:
-                rows, explicit_headers = [], 0
+                rows, explicit_headers, layout = [], 0, {}
                 parse_error = str(exc)
             caption = table_captions[index - 1] if index <= len(table_captions) else ("", "", None)
             objects.append(DocumentObject(f"p{page.page_number}_table_{index}", "table", page.page_number, index,
@@ -250,6 +263,7 @@ def build_document_objects(pages: list[PageContent]) -> list[DocumentObject]:
                 nearby_text=nearby, bbox=_record_bbox(record.get("bbox")),
                 metadata={"engine": str(record.get("engine") or page_engine),
                           "header_row_count": explicit_headers or table_header_row_count(rows),
+                          "header_rows_explicit": bool(explicit_headers), "table_layout": layout,
                           "cell_count": sum(len(row) for row in rows), "index_reference": is_index,
                           "table_parse_error": parse_error,
                           "raw_html": str(record.get("html") or "") if parse_error else ""}))
@@ -275,7 +289,8 @@ def build_document_objects(pages: list[PageContent]) -> list[DocumentObject]:
 
 
 def render_table_object_chunks(obj: DocumentObject, *, rows_per_chunk: int = 20,
-                                max_chars: int | None = None, max_cells: int | None = None) -> list[str]:
+                                max_chars: int | None = None, max_cells: int | None = None,
+                                diagnostics: list | None = None) -> list[str]:
     """Repeat every header; reject a single oversized row instead of dropping cells."""
     if obj.object_type != "table" or not obj.rows:
         return []
@@ -284,36 +299,47 @@ def render_table_object_chunks(obj: DocumentObject, *, rows_per_chunk: int = 20,
     width = max(len(row) for row in obj.rows)
     rectangular = [list(row) + [""] * (width - len(row)) for row in obj.rows]
     header = rectangular[:headers]
-    body = rectangular[headers:]
-    def render(chunk, index, total):
-        rows = header + chunk
+    body = list(enumerate(rectangular[headers:], headers + 1))
+    def render(chunk, index, total, *, record_diagnostics=False):
+        rows = header + [row for _, row in chunk]
+        paths = ""
+        import config
+        if getattr(config, "TABLE_HEADER_PATHS_ENABLED", False):
+            from utils.table_paths import render_paths
+            paths, notes = render_paths([obj], max_chars=config.TABLE_HEADER_PATHS_MAX_CHARS,
+                                        row_numbers={r for r, _ in chunk})
+            if record_diagnostics and diagnostics is not None:
+                for note in notes:
+                    record = {"object_id": obj.object_id, "chunk": index, **note}
+                    if record not in diagnostics:
+                        diagnostics.append(record)
         return "\n".join([
             f"=== 페이지 {obj.page_number} ===", "[문서객체: 표 우선 데이터]",
             f"object_id: {obj.object_id}", f"evidence_id: {obj.metadata.get('evidence_id', '')}",
             f"object_chunk: {index}/{total}", f"caption: {obj.caption}",
             f"section: {obj.section}", f"nearby_text: {obj.nearby_text}",
-            f"header_rows: {headers}", "table_markdown:",
+            f"header_rows: {headers}", *([paths] if paths else []), "table_markdown:",
             table_to_markdown(rows, max_rows=len(rows), header_rows=headers),
         ])
     chunks = []
     chunk = []
-    for row in body:
-        candidate = chunk + [row]
-        rows = header + candidate
+    for indexed_row in body:
+        candidate = chunk + [indexed_row]
+        rows = header + [row for _, row in candidate]
         over = (len(candidate) + headers > max(headers + 1, int(rows_per_chunk))
                 or (max_cells is not None and sum(len(r) for r in rows) > max_cells)
                 or (max_chars is not None and len(render(candidate, 1, max(1, len(body)))) > max_chars))
         if over and chunk:
             chunks.append(chunk)
-            chunk = [row]
+            chunk = [indexed_row]
         else:
             chunk = candidate
-        if (max_cells is not None and sum(len(r) for r in header + chunk) > max_cells
+        if (max_cells is not None and sum(len(r) for r in header + [row for _, row in chunk]) > max_cells
                 or max_chars is not None and len(render(chunk, 1, max(1, len(body)))) > max_chars):
             raise ValueError(f"object {obj.object_id}: header/single row exceeds configured batch limit")
     if chunk or not chunks:
         chunks.append(chunk)
-    rendered = [render(chunk, i, len(chunks)) for i, chunk in enumerate(chunks, 1)]
+    rendered = [render(chunk, i, len(chunks), record_diagnostics=True) for i, chunk in enumerate(chunks, 1)]
     if max_chars is not None and any(len(text) > max_chars for text in rendered):
         raise ValueError(f"object {obj.object_id}: chunk marker exceeds character limit")
     return rendered

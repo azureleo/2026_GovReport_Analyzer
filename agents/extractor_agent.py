@@ -446,6 +446,7 @@ class ExtractorAgent:
         self._object_chunk_results: dict[str, list[dict]] = {}
         self.coverage_routes: list[dict] = []
         self._coverage_current_record = None
+        self.table_path_diagnostics: list[dict] = []
 
     def _record_extraction(self, record):
         if config.SOURCE_COVERAGE_MODE == "audit":
@@ -493,11 +494,14 @@ class ExtractorAgent:
                 "필드 구성과 분류 체계는 가이드라인을 따르세요.\n"
             )
 
+        from utils.fact_contracts import CONTRACT_PROMPT, METRICS, mode
+        contract_prompt = CONTRACT_PROMPT if mode() != "off" and sheet_key in METRICS else ""
         full_prompt = (
             f"지자체명: {municipality}"
             f"{guideline_block}\n\n"
             f"[배치 텍스트]\n{batch_text}\n\n"
             '각 행에 출처페이지를 정수 또는 정수 배열로 기록하세요. 명시된 object_id/evidence_id가 있으면 객체ID/근거ID로 보존하세요.\n'
+            f"{contract_prompt}"
             f"{cfg['prompt']}"
         )
         if self._coverage_current_record is not None:
@@ -583,10 +587,23 @@ class ExtractorAgent:
                     row[field] = lineage[field]
             row_lineage = {**lineage, "source_evidence_ids": row["evidence_ids"],
                            "source_object_ids": row["source_object_ids"]}
+            if row.get("_fact_cells"):
+                row_lineage["fact_cells"] = row["_fact_cells"]
             row.setdefault("_extraction_sources", []).append(row_lineage)
             row["출처계보"] = json.dumps(row["_extraction_sources"], ensure_ascii=False, sort_keys=True)
             row["OCR보완여부"] = is_ocr
         return rows
+
+    def _annotate_facts(self, sheet_key, rows, obj, pages):
+        from utils.fact_contracts import annotate_row, mode
+        if mode() == "off":
+            return rows
+        # An object call cannot attest another table on the same page. A normal
+        # page batch can reference only tables actually supplied in that batch.
+        sources = [obj] if obj.object_type == "table" else [
+            o for o in self.document_objects if o.page_number in pages]
+        cell_index = {}
+        return [annotate_row(sheet_key, row, sources, cell_index=cell_index) for row in rows]
 
     def _run_extraction_batch(self, sheet_key: str, text: str, municipality: str,
                               guideline_prompt: str, obj: DocumentObject, source: str,
@@ -597,6 +614,11 @@ class ExtractorAgent:
                               "municipality": municipality,
                               "schema_prompt": _SHEET_CONFIGS[sheet_key]["prompt"]},
                              ensure_ascii=False, sort_keys=True)
+        if getattr(config, "FACT_CONTRACT_MODE", "off") != "off" or config.TABLE_HEADER_PATHS_ENABLED:
+            from utils.fact_contracts import VERSION
+            request += json.dumps({"fact_contract": config.FACT_CONTRACT_MODE, "version": VERSION,
+                                   "table_paths": config.TABLE_HEADER_PATHS_ENABLED,
+                                   "path_budget": config.TABLE_HEADER_PATHS_MAX_CHARS}, sort_keys=True)
         fingerprint = hashlib.sha256((sheet_key + text + request).encode()).hexdigest()
         batch_id = state.batch_id(kind="sheet", sheet_keys=[sheet_key], page_nums=pages,
                                   batch_text=text, request_fingerprint=fingerprint) if state else fingerprint[:32]
@@ -621,7 +643,7 @@ class ExtractorAgent:
             if isinstance(restored, list):
                 record.update(status="ok", rows=len(restored), reused=True)
                 self._record_extraction(record)
-                return restored
+                return self._annotate_facts(sheet_key, restored, obj, pages)
             if not state.should_execute(batch_id):
                 record.update(status="unresolved", rows=0, error="batch was not attempted in retry-failed-only mode")
                 self._record_extraction(record)
@@ -634,12 +656,14 @@ class ExtractorAgent:
             rows = self._extract_sheet(sheet_key, text, municipality, guideline_prompt,
                                        strict=True, force=obj.metadata.get("force_extract", False))
             rows = self._attach_sources(rows, obj, source, pages)
+            rows = self._annotate_facts(sheet_key, rows, obj, pages)
             record.update(status="ok", rows=len(rows), elapsed_seconds=time.perf_counter() - started)
             if state:
                 state.record_batch(batch_id=batch_id, kind="sheet", sheet_keys=[sheet_key],
                                    page_nums=pages, status="ok", result=rows)
         except PartialExtractionError as exc:
             rows = self._attach_sources(exc.rows, obj, source, pages)
+            rows = self._annotate_facts(sheet_key, rows, obj, pages)
             record.update(status="partial" if rows else "parse_fail", rows=len(rows),
                           invalid_row_count=len(exc.invalid_rows), invalid_rows=exc.invalid_rows,
                           error=str(exc), elapsed_seconds=time.perf_counter() - started)
@@ -685,10 +709,17 @@ class ExtractorAgent:
                 continue
             try:
                 if obj.object_type == "table":
+                    if config.TABLE_HEADER_PATHS_ENABLED:
+                        from utils.table_paths import table_paths
+                        for diagnostic in table_paths(obj)["diagnostics"]:
+                            record = {"object_id": obj.object_id, **diagnostic}
+                            if record not in self.table_path_diagnostics:
+                                self.table_path_diagnostics.append(record)
                     chunks = render_table_object_chunks(obj,
                         rows_per_chunk=getattr(config, "TABLE_OBJECT_ROWS_PER_CHUNK", 20),
                         max_chars=getattr(config, "MAX_BATCH_CHARS", None),
-                        max_cells=getattr(config, "MAX_BATCH_TABLE_CELLS", None))
+                        max_cells=getattr(config, "MAX_BATCH_TABLE_CELLS", None),
+                        diagnostics=self.table_path_diagnostics)
                 else:
                     cap = getattr(config, "MAX_BATCH_CHARS", None)
                     prefix = f"=== 페이지 {obj.page_number} ===\nobject_id: {obj.object_id}\nevidence_id: {obj.metadata.get('evidence_id', '')}\n"
@@ -717,6 +748,7 @@ class ExtractorAgent:
                     key = hashlib.sha256(json.dumps(
                         {"sheet": sheet_key, "text": text, "object_id": obj.object_id,
                          "municipality": municipality,
+                         "fact_contract_mode": config.FACT_CONTRACT_MODE,
                          "prompt": extraction_prompts.get(sheet_key, ""),
                          "schema_prompt": _SHEET_CONFIGS[sheet_key]["prompt"]},
                         ensure_ascii=False, sort_keys=True).encode()).hexdigest()
@@ -761,6 +793,13 @@ class ExtractorAgent:
                                         sheet_keys=[sheet_key])[sheet_key]
         text = _build_page_text(batch)
         pages = [page.page_number for page in batch]
+        if config.TABLE_HEADER_PATHS_ENABLED:
+            from utils.table_paths import render_paths
+            tables = [o for o in self.document_objects if o.page_number in pages and o.object_type == "table"]
+            paths, diagnostics = render_paths(tables, max_chars=config.TABLE_HEADER_PATHS_MAX_CHARS)
+            self.table_path_diagnostics.extend(d for d in diagnostics if d not in self.table_path_diagnostics)
+            if paths:
+                text += "\n\n" + paths
         oid = "batch-" + hashlib.sha256(text.encode()).hexdigest()[:20]
         table_cells = 0
         table_measurement_errors = []

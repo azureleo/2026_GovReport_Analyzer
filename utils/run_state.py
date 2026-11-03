@@ -24,6 +24,7 @@ EXTRACTION_SOURCE_TEXT_CHUNK = "본문청크"
 _VOLATILE_ROW_FIELDS = frozenset({"_row_id", "_entity_id", EXTRACTION_SOURCE_FIELD,
     "_extraction_sources", "_merge_conflicts", "_merge_conflict", "_axis_validation",
     "_semantic_routing", "_forecast_scope_review", "_forecast_routing_review"})
+_VOLATILE_ROW_FIELDS = _VOLATILE_ROW_FIELDS | {"_fact_contract", "_fact_cells", "_fact_cell_aliases"}
 
 _ENTITY_FIELDS: dict[str, tuple[str, ...]] = {
     "document_meta": ("지자체명", "계획명"),
@@ -142,6 +143,9 @@ def stable_row_id(sheet_key: str, row: dict[str, Any]) -> str:
 
 
 def stable_entity_id(sheet_key: str, row: dict[str, Any]) -> str:
+    from utils.fact_contracts import METRICS, mode, row_identity
+    if mode() == "enforce" and sheet_key in METRICS:
+        return sha256_json(row_identity(sheet_key, row))
     fields = _ENTITY_FIELDS.get(sheet_key, ())
     values = {field: row.get(field) for field in fields if row.get(field) not in (None, "")}
     minimum = 1 if sheet_key == "document_meta" else 2
@@ -195,6 +199,11 @@ def merge_rows_stably(
     Source preference is retained as an API compatibility argument, never authority
     to discard a different value. An entity is scoped by scenario, subsector and unit.
     """
+    from utils.fact_contracts import METRICS, mode
+    if mode() == "enforce" and sheet_key in METRICS:
+        from utils.evidence_merge import merge_extraction_rows
+        conflicts = []
+        return merge_extraction_rows(sheet_key, list(existing), list(incoming), conflicts), conflicts
     from agents.organizer_agent import _merge_row_evidence, _PROVENANCE_FIELDS
     provenance = _PROVENANCE_FIELDS
     facts: dict[str, dict[str, Any]] = {}
@@ -369,6 +378,9 @@ class RunState:
             "route_context_pages": getattr(config, "DOCUMENT_ROUTE_CONTEXT_PAGES", None),
             "text_workers": getattr(config, "TEXT_WORKERS", None),
             "table_object_enabled": getattr(config, "EXTRACTION_OBJECT_BATCHING_ENABLED", False),
+            "fact_contract_mode": getattr(config, "FACT_CONTRACT_MODE", "off"),
+            "table_header_paths": getattr(config, "TABLE_HEADER_PATHS_ENABLED", False),
+            "table_header_paths_max_chars": getattr(config, "TABLE_HEADER_PATHS_MAX_CHARS", 6000),
             "batch_max_chars": getattr(config, "MAX_BATCH_CHARS", None),
             "table_max_cells": getattr(config, "MAX_BATCH_TABLE_CELLS", None),
             "table_rows_per_chunk": getattr(config, "TABLE_OBJECT_ROWS_PER_CHUNK", None),

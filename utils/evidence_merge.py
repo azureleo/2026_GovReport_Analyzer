@@ -114,6 +114,9 @@ def _merge_lineage(target, source):
 def merge_extraction_rows(sheet_key: str, existing: list[dict], incoming: list[dict],
                           conflicts: list[dict] | None = None) -> list[dict]:
     """No source rank wins a value conflict. Strict keys include scope/scenario/unit."""
+    from utils.fact_contracts import METRICS, merge_rows, mode
+    if mode() == "enforce" and sheet_key in METRICS:
+        return merge_rows(sheet_key, existing, incoming, conflicts)
     output = [deepcopy(row) for row in existing if isinstance(row, dict)]
     known_conflicts = {_serialize(item) for item in conflicts or []}
     for row in incoming:

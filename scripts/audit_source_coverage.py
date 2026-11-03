@@ -14,10 +14,12 @@ def main():
     parser.add_argument("--pipeline-audit", required=True, help="같은 실행의 pipeline_audit.json")
     parser.add_argument("--output-prefix", required=True, help="새 출력 폴더/실행명 (확장자 제외)")
     parser.add_argument("--overwrite", action="store_true", help="기존 감사 산출물만 명시적으로 교체")
+    parser.add_argument("--table-header-paths", choices=["on", "off"], help="연도 상위 머리글 처리 (미지정 시 생산 실행 설정 승계)")
     args = parser.parse_args()
     try:
         result = audit_saved_run(args.input, args.excel, args.pipeline_audit, args.output_prefix,
-                                 overwrite=args.overwrite)
+                                 overwrite=args.overwrite,
+                                 header_paths=None if args.table_header_paths is None else args.table_header_paths == "on")
     except (OSError, ValueError, TypeError, KeyError) as error:
         parser.exit(2, f"감사 실행 실패: {error}\n")
     print(f"비교 가능 사실: {result['comparable_facts']} / 상태: {result['counts']}")

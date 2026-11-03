@@ -118,7 +118,8 @@ def source_snapshot(objects):
         copied["metadata"] = {key: deepcopy(value) for key, value in (obj.get("metadata") or {}).items()
             if key in {"engine", "evidence_id", "physical_object_id", "original_object_ids", "source_object_ids",
                        "source_evidence_ids", "original_evidence_ids", "alias_object_ids", "index_reference", "is_index_reference",
-                       "header_row_count", "table_parse_error", "parse_errors", "unit", "source_kind", "render_proxy", *CONTEXT_FIELDS}}
+                       "header_row_count", "header_rows_explicit", "table_layout", "row_header_columns",
+                       "table_parse_error", "parse_errors", "unit", "source_kind", "render_proxy", *CONTEXT_FIELDS}}
         selected.append(copied)
     return selected
 
@@ -169,10 +170,21 @@ def _year_scope(objects):
     return {"ambiguous": True, "ranges": list(scopes.values())} if scopes else None
 
 
-def _header_years(headers, scope):
+def _header_years(headers, scope, *, header_paths=False):
     result = {}
     for c, header in enumerate(headers):
         label = header.split(" / ")[-1].strip()
+        if header_paths:
+            # A unique year ancestor is usable even when the leaf is a metric.
+            # A period/range or competing year ancestors remains unassessable.
+            ancestors = header.split(" / ")
+            candidates = {int(m.group(1)) for part in ancestors
+                          if (m := re.fullmatch(r"((?:19|20)\d{2})\s*년?", part.strip()))}
+            if len(candidates) == 1 and not re.search(r"합계|누계|누적|총계|~|～|–|—", header):
+                result[c] = next(iter(candidates))
+                continue
+            if len(candidates) > 1:
+                continue
         if match := re.fullmatch(r"((?:19|20)\d{2})\s*년?", label):
             result[c] = int(match.group(1))
         elif scope and not scope.get("ambiguous") and (match := re.fullmatch(r"[’'‘ʼ](\d{2})\s*년?", label)):
@@ -266,7 +278,7 @@ def _spatial_unit(obj, annotations):
     return candidates[0]["literal"], candidates
 
 
-def itemize(objects, document_sha256):
+def itemize(objects, document_sha256, *, header_paths=False):
     """기계적으로 해석 가능한 명시 표 셀/과제. 나머지는 진단으로 보존."""
     facts, diagnostics, counts = [], [], Counter()
     seen_objects, seen_facts, seen_nonbudget = set(), {}, {}
@@ -326,7 +338,7 @@ def itemize(objects, document_sha256):
         active_year_headers, active_year_header_row = headers, header_count
         name_columns = [c for c, f in enumerate(fields) if f in NAME_FIELDS]
         if len(name_columns) != 1:
-            if _header_years(headers, year_scope) or any("성과지표" in h for h in headers):
+            if _header_years(headers, year_scope, header_paths=header_paths) or any("성과지표" in h for h in headers):
                 diagnose("caption_business_context_required" if source["caption_project"] else "business_identity_unresolved")
             else:
                 counts["outside_supported_identity"] += 1
@@ -336,7 +348,7 @@ def itemize(objects, document_sha256):
             token(row[name_col]) not in ABSENT | {"합계", "계", "소계", "총계"} and not _header_field(str(row[name_col]))}
         source["business_subject_count"] = len(subject_names)
         source["business_subject_names"] = sorted(subject_names)
-        years = _header_years(headers, year_scope)
+        years = _header_years(headers, year_scope, header_paths=header_paths)
         counts["excluded_total_columns"] += sum(token(h) in {"계", "합계", "소계", "총계"} for h in headers)
         metric_columns = [(c, f) for c, f in enumerate(fields) if f in VALUE_FIELDS and f != "과제명"]
         foundation = fields[name_col] == "과제명" and "주관부서" in fields and not metric_columns and not years
@@ -366,7 +378,7 @@ def itemize(objects, document_sha256):
                 table_unit = next(iter(nearby_units))
                 unit_origin = "unique_explicit_page_currency_unit_reviewable"
         for r, cells in enumerate(rows[header_count:], header_count + 1):
-            repeated_years = _header_years([str(v) for v in cells], year_scope)
+            repeated_years = _header_years([str(v) for v in cells], year_scope, header_paths=header_paths)
             header_labels = {"사업명", "사업명(단위)", "성과지표", "성과지표(단위)", "구분", "합계", "계", "비고", "단위", "예산단위", "활동단위"}
             normal_header = all(c in repeated_years or not str(v).strip() or token(v) in header_labels for c, v in enumerate(cells))
             labelled_header = (name_col not in repeated_years and token(cells[name_col]) not in ABSENT | header_labels and
@@ -726,8 +738,8 @@ def _exposure(fact, records, routes):
 
 
 def compare(objects, document_sha256, excel_data, *, raw=None, cleaned=None,
-            records=(), routes=(), quarantine=(), provenance=None):
-    facts, diagnostics, counts = itemize(objects, document_sha256)
+            records=(), routes=(), quarantine=(), provenance=None, header_paths=False):
+    facts, diagnostics, counts = itemize(objects, document_sha256, header_paths=header_paths)
     indices = {"raw": RowIndex(raw) if raw is not None else None,
                "cleaned": RowIndex(cleaned) if cleaned is not None else None,
                "excel": RowIndex(excel_data)}
@@ -776,7 +788,7 @@ def compare(objects, document_sha256, excel_data, *, raw=None, cleaned=None,
                         "review_status": "not_required" if diagnostic["status"] == "excluded" else "pending",
                         "recall_policy": "excluded_from_recall" if diagnostic["status"] == "excluded" else "review_before_recall",
                         "second_pass_status": "not_requested"})
-    summary = {"schema_version": VERSION, "mode": "audit", "model_calls_added": 0,
+    summary = {"schema_version": VERSION, "mode": "audit", "model_calls_added": 0, "table_header_paths": header_paths,
                "business_data_modified": False, "model_accuracy_evaluated": False,
                "document_sha256": document_sha256, "supported_sheets": SHEETS,
                "comparable_facts": len(facts), "counts": dict(Counter(r["status"] for r in journal)),
@@ -832,7 +844,7 @@ def persist(output_prefix, journal, summary, *, overwrite=False):
     return result
 
 
-def audit_saved_run(input_path, excel_path, pipeline_audit, output_prefix, *, overwrite=False):
+def audit_saved_run(input_path, excel_path, pipeline_audit, output_prefix, *, overwrite=False, header_paths=None):
     """독립 실행용. 저장된 객체를 재사용; dotenv/모델/네트워크/문서 재판독 없음."""
     started = time.perf_counter()
     link_path = Path(output_prefix).with_name(Path(output_prefix).name + "_pipeline_audit.json")
@@ -866,10 +878,12 @@ def audit_saved_run(input_path, excel_path, pipeline_audit, output_prefix, *, ov
                   "auditor_rule_version": VERSION, "auditor_module_sha256": sha256_file(__file__),
                   "excel_sha256": actual_excel_hash, "pipeline_audit_sha256": sha256_file(pipeline_audit),
                   "excel_binding": "sha256" if expected_excel_hash else "legacy_filename_only_unverified_hash"}
+    if header_paths is None:
+        header_paths = bool(audit.get("context", {}).get("features", {}).get("table_header_paths", False))
     journal, summary = compare(objects, digest, read_excel(excel_path),
         raw=capture.get("raw"), cleaned=capture.get("cleaned"),
         records=ledgers.get("extraction_records", []), routes=capture.get("routes", []),
-        quarantine=ledgers.get("_semantic_contract_quarantine", []), provenance=provenance)
+        quarantine=ledgers.get("_semantic_contract_quarantine", []), provenance=provenance, header_paths=header_paths)
     summary["audit_elapsed_seconds_before_persistence"] = round(time.perf_counter() - started, 6)
     summary["pipeline_audit_link_path"] = str(link_path.resolve())
     saved = persist(output_prefix, journal, summary, overwrite=overwrite)

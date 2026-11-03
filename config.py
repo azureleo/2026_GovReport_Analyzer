@@ -290,6 +290,12 @@ IMAGE_FALLBACK_MAX_OBSERVATIONS = _env_optional_int("IMAGE_FALLBACK_MAX_OBSERVAT
 # main 기반 선별 통합. 모델/provider/reasoning 설정은 위의 기존 계약을 유지한다.
 # 객체 추출·OCR은 명시적으로 켜기 전에는 추가 모델 호출을 만들지 않는다.
 EXTRACTION_OBJECT_BATCHING_ENABLED = _env_bool("EXTRACTION_OBJECT_BATCHING_ENABLED", False)
+# Research adaptations are independent, opt-in experiments; never change models.
+FACT_CONTRACT_MODE = os.environ.get("FACT_CONTRACT_MODE", "off").strip().lower()
+if FACT_CONTRACT_MODE not in {"off", "audit", "enforce"}:
+    raise ValueError("FACT_CONTRACT_MODE must be off, audit or enforce")
+TABLE_HEADER_PATHS_ENABLED = _env_bool("TABLE_HEADER_PATHS_ENABLED", False)
+TABLE_HEADER_PATHS_MAX_CHARS = max(256, _env_int("TABLE_HEADER_PATHS_MAX_CHARS", 6000))
 MAX_BATCH_CHARS = _env_optional_int("MAX_BATCH_CHARS", None)
 MAX_BATCH_TABLE_CELLS = _env_optional_int("MAX_BATCH_TABLE_CELLS", None)
 TABLE_OBJECT_ROWS_PER_CHUNK = _env_int("TABLE_OBJECT_ROWS_PER_CHUNK", 20)
@@ -339,6 +345,7 @@ INTERNAL_OBJECT_KEYS = {
     "_semantic_contract_quarantine", "_key_blank_stats", "reduction_target_context",
     "source_validation", "vision_execution", "semantic_routing_report", "object_evidence_audit",
     "source_coverage_snapshot",
+    "fact_contract_review", "fact_contract_summary", "table_path_diagnostics",
 }
 PROVENANCE_HEADERS = ["출처페이지", "근거ID", "객체ID", "추출원천", "검수상태", "추출엔진", "OCR보완여부", "출처계보"]
 if PROVENANCE_ENABLED:

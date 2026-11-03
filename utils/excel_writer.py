@@ -115,9 +115,16 @@ def write_excel(extracted_data: dict, output_path: str | Path) -> Path:
                 data_key = key
                 break
 
+        from utils.fact_contracts import excel_headers
+        headers = excel_headers(data_key, headers)
+
         data = extracted_data.get(data_key, []) if data_key else []
         if not isinstance(data, list):
             data = []
+
+        if config.FACT_CONTRACT_MODE == "enforce" and data_key == "reduction_targets":
+            # The prompt/cleaner use 감축률; the established display header uses %.
+            data = [{**row, "감축률(%)": row.get("감축률")} for row in data]
 
         _write_generic_sheet(ws, headers, data)
 

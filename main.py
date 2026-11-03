@@ -136,6 +136,8 @@ def main():
     parser.add_argument("--selective-ocr", action="store_true", help="저장된 OCR의 변경 객체만 관련 시트로 재추출 (서버 자동 호출 없음)")
     parser.add_argument("--ocr-results-dir", help="사전 생성 OCR Markdown/TXT/JSONL 디렉터리")
     parser.add_argument("--object-batching", action="store_true", help="표/텍스트 객체 청킹 활성화 (복수 헤더 반복)")
+    parser.add_argument("--fact-contract", choices=["off", "audit", "enforce"], help="실험: 사실 식별 계약 진단 / 검증·보류·병합 적용")
+    parser.add_argument("--table-header-paths", choices=["on", "off"], help="실험: 원본 표 행·열 머리글 경로를 기존 입력에 추가 (추가 호출 없음)")
     parser.add_argument("--batch-max-chars", type=int, help="추출 입력 문자 상한; 0이면 제한 없음")
     parser.add_argument("--batch-max-table-cells", type=int, help="표 셀 상한; 0이면 제한 없음")
     parser.add_argument("--semantic-routing", choices=["audit", "apply"], help="시트 의미 진단만 또는 근거 있는 전망 행 이동")
@@ -171,6 +173,10 @@ def main():
         os.environ["OCR_BACKEND"] = "directory"
     if args.object_batching:
         os.environ["EXTRACTION_OBJECT_BATCHING_ENABLED"] = "1"
+    if args.fact_contract:
+        os.environ["FACT_CONTRACT_MODE"] = args.fact_contract
+    if args.table_header_paths:
+        os.environ["TABLE_HEADER_PATHS_ENABLED"] = "1" if args.table_header_paths == "on" else "0"
     for value, name in ((args.batch_max_chars, "MAX_BATCH_CHARS"),
                         (args.batch_max_table_cells, "MAX_BATCH_TABLE_CELLS")):
         if value is not None:

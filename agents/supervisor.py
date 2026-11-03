@@ -220,6 +220,9 @@ class Supervisor:
         context = {"input_sha256": document_hash(input_path), "model_accuracy_evaluated": False,
                    "features": {"selective_ocr": config.SELECTIVE_OCR_ENABLED,
                                 "object_batching": config.EXTRACTION_OBJECT_BATCHING_ENABLED,
+                                "fact_contract_mode": config.FACT_CONTRACT_MODE,
+                                "table_header_paths": config.TABLE_HEADER_PATHS_ENABLED,
+                                "table_header_paths_max_chars": config.TABLE_HEADER_PATHS_MAX_CHARS,
                                 "semantic_routing": config.SEMANTIC_ROUTING_ENABLED},
                    "warnings": []}
         coverage_capture = None
@@ -271,6 +274,7 @@ class Supervisor:
             raw_data["document_objects"] = [asdict(obj) for obj in objects]
             raw_data["extraction_records"] = deepcopy(getattr(extractor, "extraction_records", []))
             raw_data["merge_conflicts"] = raw_data.get("merge_conflicts", []) + deepcopy(getattr(extractor, "merge_conflicts", []))
+            raw_data["table_path_diagnostics"] = deepcopy(getattr(extractor, "table_path_diagnostics", []))
 
             municipality = raw_data.get("municipality_name", "알 수 없음")
 
@@ -336,6 +340,8 @@ class Supervisor:
         # STEP 4: 엑셀 작성
         self._log("\n[감독관] STEP 4: 엑셀 작성 에이전트 실행...")
         excel_agent = ExcelAgent()
+        from utils.fact_contracts import apply_contracts, mode as fact_contract_mode
+        apply_contracts(final_data, stage="pre_save")  # Before inventories/source checks as well as Excel.
         reflected_ids = {eid for _, row in body_rows(final_data) for eid in evidence_ids(row)}
         for obj in objects:
             state = states.setdefault(obj.object_id, {"status": "native_parsed"})
@@ -393,6 +399,18 @@ class Supervisor:
                              "failed_vision_batches": len(vision_failures),
                              "review_items": len(validation),
                              "ocr_summary": final_data.get("ocr_import_audit", {})}
+        if fact_contract_mode() != "off":
+            try:
+                from utils.fact_contracts import persist_contract_report
+                contract_saved = persist_contract_report(result_path, final_data)
+                self.last_outcome["fact_contracts"] = contract_saved
+                context["fact_contracts"] = {**final_data.get("fact_contract_summary", {}), **contract_saved}
+                if contract_saved["missing_rows"] or contract_saved["unwritten_axis_rows"]:
+                    context["warnings"].append(f"사실 계약 저장 미확인 {contract_saved['missing_rows']}행 / 식별 열 미저장 {contract_saved['unwritten_axis_rows']}행: 계약 감사 파일 확인")
+                self._log(f"[사실 계약] {contract_saved['path']} (연결 검사, 모델 정확도 미평가)")
+            except Exception as error:
+                context["warnings"].append(f"사실 계약 저장 검증 실패 (Excel 보존): {error}")
+                self.last_outcome["fact_contracts"] = {"status": "failed", "error": str(error)}
         if config.SOURCE_COVERAGE_MODE == "audit":
             try:
                 from utils.source_coverage import compare, persist, read_excel, sha256_file, VERSION
@@ -408,7 +426,8 @@ class Supervisor:
                 journal, summary = compare(coverage_source_objects or objects, context["input_sha256"], read_excel(result_path),
                     raw=capture.get("raw"), cleaned=capture.get("cleaned"),
                     records=final_data.get("extraction_records", []), routes=capture.get("routes", []),
-                    quarantine=final_data.get("_semantic_contract_quarantine", []), provenance=provenance)
+                    quarantine=final_data.get("_semantic_contract_quarantine", []), provenance=provenance,
+                    header_paths=config.TABLE_HEADER_PATHS_ENABLED)
                 summary["audit_elapsed_seconds_before_persistence"] = round(time.perf_counter() - coverage_started, 6)
                 saved = persist(result_path.with_suffix(""), journal, summary)
                 context["source_coverage"] = {"mode": "audit", "status": "saved", **saved,
