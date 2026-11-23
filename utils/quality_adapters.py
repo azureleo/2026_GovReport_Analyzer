@@ -136,7 +136,11 @@ def read_saved_workbook(path):
                 diagnostics.append(issue("storage.duplicate_header", key, certainty="confirmed", severity="error"))
             for field in config.EXCEL_HEADERS[name]:
                 if field not in headers:
-                    diagnostics.append(issue("storage.header_missing", key, 1, field, certainty="confirmed", severity="error"))
+                    from utils.extraction_schema import EXTRA_FIELDS
+                    optional = field in EXTRA_FIELDS.get(key, ())
+                    diagnostics.append(issue("storage.optional_header_unavailable" if optional else "storage.header_missing",
+                        key, 1, field, certainty="unassessed" if optional else "confirmed",
+                        severity="info" if optional else "error"))
             for n, values in enumerate(iterator, 2):
                 if not any(present(v) for v in values):
                     continue
@@ -167,7 +171,9 @@ def compare_storage(saved, expected):
         return diagnostics, metric(None, None, "메모리→실제 Excel 업무 셀", reason="저장 전 스냅샷 미제공")
     for key in config.EXTRACTION_SHEETS:
         headers = config.EXCEL_HEADERS[config.SHEET_KEY_TO_NAME[key]]
-        memory = [r for r in expected.get(key, []) if any(present(excel_value(r.get(f))) for f in headers)]
+        from utils.extraction_schema import export_row
+        projected = [export_row(key, r) for r in expected.get(key, [])]
+        memory = [r for r in projected if any(present(excel_value(r.get(f))) for f in headers)]
         actual = saved[key]
         if len(memory) != len(actual):
             diagnostics.append(issue("storage.row_count", key, certainty="confirmed", severity="error",

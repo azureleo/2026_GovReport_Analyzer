@@ -399,7 +399,8 @@ def _clean_regional_conditions(rows: list[dict], municipality: str) -> list[dict
         row["연도"] = _to_int(row.get("연도"))
         row["값"] = _to_float(row.get("값"))
     rows = _filter_empty_rows(rows, ["값", "지표명"])
-    return _deduplicate_rows(rows, ["지자체명", "지표범주", "지표명", "연도"])
+    from utils.evidence_merge import merge_extraction_rows
+    return merge_extraction_rows("regional_conditions", [], rows)
 
 
 def _clean_emissions_regional(rows: list[dict], municipality: str) -> list[dict]:
@@ -504,7 +505,7 @@ def _clean_quantitative_reductions(rows: list[dict], municipality: str) -> list[
         row["활동량"] = _to_float(row.get("활동량"))
         row["감축원단위값"] = _to_float(row.get("감축원단위값"))
         row["예상감축량"] = _to_float(row.get("예상감축량"))
-    return _filter_empty_rows(rows, ["예상감축량", "활동량"])
+    return _filter_empty_rows(rows, ["예상감축량", "활동량", "감축원단위값"])
 
 
 def _clean_financial_plan(rows: list[dict], municipality: str) -> list[dict]:
@@ -572,11 +573,25 @@ class OrganizerAgent:
 
     def organize(self, raw_data: dict, full_text_excerpt: str = "") -> dict:
         print("[에이전트3 정리] 정제 시작...")
+        from utils.extraction_schema import VERSION, normalize_row
+        raw_data = deepcopy(raw_data)
+        raw_data["field_schema_version"] = VERSION
+        reviews = list(raw_data.get("field_contract_review", []))
+        for sheet in config.EXTRACTION_SHEETS:
+            if not isinstance(raw_data.get(sheet), list):
+                continue
+            raw_data[sheet] = [normalize_row(sheet, row) for row in raw_data[sheet] if isinstance(row, dict)]
+            for row in raw_data[sheet]:
+                if row.get("_field_alias_conflicts"):
+                    record = {"sheet_key": sheet, "reason": "field_alias_conflict",
+                              "row": deepcopy(row), "conflicts": row["_field_alias_conflicts"]}
+                    if record not in reviews:
+                        reviews.append(record)
+        raw_data["field_contract_review"] = reviews
         from utils.fact_contracts import apply_contracts, mode
         if mode() == "enforce":
             # Validate before cleaners turn invalid strings into null or discard
             # rows. Original rejected proposals survive in the contract ledger.
-            raw_data = deepcopy(raw_data)
             apply_contracts(raw_data, stage="pre_clean")
         municipality = raw_data.get("municipality_name", "알 수 없음")
 
@@ -597,6 +612,12 @@ class OrganizerAgent:
         if not isinstance(issues, list):
             issues = []
             cleaned["validation_report"] = issues
+        for review in reviews:
+            issue = {"지자체명": municipality, "대상시트": review["sheet_key"],
+                     "항목": "공통 필드 별칭 충돌", "사유": "원값을 field_contract_review에 보존하고 충돌 필드 저장을 보류했습니다.",
+                     "출처페이지": review["row"].get("출처페이지")}
+            if issue not in issues:
+                issues.append(issue)
         key_fields = {
             "emissions_regional": ("배출유형", "부문", "연도"),
             "emissions_management": ("관리부문", "직간접구분", "연도"),

@@ -18,6 +18,7 @@ from pathlib import Path
 import config
 from utils.hwp_reader import extract_hwp, is_hwp_file
 from utils import llm_client
+from utils.extraction_schema import BUSINESS_SHEETS, SHEET_NAMES, field_prompt
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _MARKDOWN_GUIDELINE_PATH = _PROJECT_ROOT / "carbon_guideline.md"
@@ -179,6 +180,19 @@ _GUIDELINE_CONTEXT_RULES_V2 = {
     "governance_feedback": ["이행관리", "환류", "점검체계", "탄소중립이행책임관"],
     "monitoring_performance": ["추진상황", "점검", "달성여부", "이행실적"],
     "changes_actions": ["변경과제", "미달성", "조치계획", "변경사유"],
+}
+
+# Prefer the relevant Markdown section to a global keyword match. HWP or
+# differently structured guides retain a keyword fallback; no extra model call.
+_GUIDELINE_SECTIONS = {
+    "document_meta": ("0.2", "0.3"), "plan_overview": ("1.2", "2.1"),
+    "regional_conditions": ("2.2",), "emissions_regional": ("2.3",),
+    "emissions_management": ("2.4",), "emissions_forecast": ("2.5",),
+    "reduction_targets": ("2.6",), "vision_strategy": ("2.6",),
+    "mitigation_projects": ("2.7", "2.9"), "annual_implementation": ("2.9", "2.7"),
+    "quantitative_reductions": ("2.9", "6.3"), "financial_plan": ("2.10",),
+    "foundation_measures": ("2.8",), "governance_feedback": ("3.5",),
+    "monitoring_performance": ("3.2", "3.3"), "changes_actions": ("3.2", "3.4"),
 }
 
 
@@ -437,6 +451,8 @@ class GuidelineAgent:
 
     def get_extraction_prompt(self, sheet_key: str) -> str:
         """특정 시트에 대한 추출 프롬프트 생성"""
+        if sheet_key in BUSINESS_SHEETS:
+            return field_prompt(sheet_key) + "\n" + self.get_all_prompts().get(sheet_key, "")
         if sheet_key not in self.schema:
             return ""
         info = self.schema[sheet_key]
@@ -477,7 +493,7 @@ class GuidelineAgent:
         """모든 16개 시트의 추출 보조 프롬프트를 시트키 기준으로 반환"""
         prompts: dict[str, str] = {}
         for sheet_key, keywords in _GUIDELINE_CONTEXT_RULES_V2.items():
-            snippets = self._get_relevant_snippets(keywords)
+            snippets = self._get_relevant_snippets(keywords, sheet_key=sheet_key)
             if snippets:
                 lines = [f"[가이드라인 보조 지침: {sheet_key}]"]
                 for idx, snippet in enumerate(snippets, start=1):
@@ -487,11 +503,41 @@ class GuidelineAgent:
                 prompts[sheet_key] = ""
         return prompts
 
-    def _get_relevant_snippets(self, keywords: list[str], max_chunks: int = 3) -> list[str]:
-        """가이드라인 텍스트에서 키워드 관련 조각을 반환"""
+    def _get_relevant_snippets(self, keywords: list[str], max_chunks: int = 3, *, sheet_key=None) -> list[str]:
+        """Keep complete bounded blocks and their heading; never cut at char 500."""
         if not self.guideline_text:
             return []
-        chunks = _split_guideline_sentences(self.guideline_text)
+        prefixes = _GUIDELINE_SECTIONS.get(sheet_key, ())
+        blocks, current, heading, section = [], [], "", ""
+        def flush():
+            if current:
+                blocks.append((section, heading, "\n".join(current)))
+                current.clear()
+        for line in self.guideline_text.splitlines():
+            if line.strip().startswith("```"):
+                flush()
+                continue
+            title = re.match(r"^#{1,6}\s+(.+)", line)
+            if title:
+                flush()
+                heading = title[1]
+                number = re.match(r"(\d+(?:\.\d+)*)\b", heading)
+                section = number[1] if number else ""
+            elif not line.strip():
+                flush()
+            else:
+                current.append(line.strip())
+        flush()
+        relevant = [b for b in blocks if any(b[0] == p or b[0].startswith(p + ".") for p in prefixes)]
+        pool = relevant or blocks
+        chunks = []
+        for _, title, block in pool:
+            # Retain a complete small table/list, otherwise select complete lines.
+            parts = [block] if len(block) <= 430 else block.splitlines()
+            for part in parts:
+                compact = _compact_text(part)
+                if compact and len(compact) <= 430:
+                    chunks.append((f"[{title}] " if title else "") + compact)
         ranked = sorted(
             ((_score_guideline_chunk(chunk, keywords), chunk) for chunk in chunks),
             key=lambda item: item[0],
@@ -506,14 +552,16 @@ class GuidelineAgent:
             if not compact or compact in seen:
                 continue
             seen.add(compact)
-            selected.append(compact[:500])
+            if len(compact) > 500 or sum(map(len, selected)) + len(compact) > 1500:
+                continue
+            selected.append(compact)
             if len(selected) >= max_chunks:
                 break
         return selected
 
     def report(self) -> str:
         """에이전트 상태 보고"""
-        sheets = [v["sheet_name"] for k, v in self.schema.items() if isinstance(v, dict) and "sheet_name" in v]
+        sheets = [SHEET_NAMES[key] for key in BUSINESS_SHEETS]
         return (
             f"[에이전트1 가이드라인] 로드 완료\n"
             f"  - 추출 대상 시트: {len(sheets)}개\n"

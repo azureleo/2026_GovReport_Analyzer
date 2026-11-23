@@ -89,115 +89,15 @@ BUSINESS_TYPES = ["기존", "변경", "신규"]
 # ──────────────────────────────────────────────────────────────────────
 # 엑셀 시트 헤더 정의 (carbon_guideline.md 5.2절 16개 시트 + 보조 시트)
 # ──────────────────────────────────────────────────────────────────────
-EXCEL_HEADERS = {
-    "00_문서메타": [
-        "지자체명", "지자체유형", "계획명", "발간일", "발간기관",
-        "계획시작연도", "계획종료연도", "기준연도", "목표연도",
-        "법적근거", "점검보고서여부",
-    ],
-    "01_계획개요": [
-        "지자체명", "개요유형", "항목명", "항목값",
-        "일자", "이해관계자", "관련법령_계획",
-    ],
-    "02_지역여건": [
-        "지자체명", "지표범주", "지표세부범주", "지표명",
-        "연도", "값", "단위", "출처",
-    ],
-    "03_배출현황_지역": [
-        "지자체명", "인벤토리출처", "배출범위", "배출유형",
-        "부문", "세부부문", "연도", "배출량", "단위", "흡수원여부",
-    ],
-    "04_배출현황_관리권한": [
-        "지자체명", "인벤토리출처", "관리부문", "세부부문",
-        "직간접구분", "연도", "배출량", "단위", "합계포함여부",
-    ],
-    "05_배출전망": [
-        "지자체명", "전망범위", "시나리오", "전망방법코드", "전망방법원문",
-        "부문", "세부부문", "연도", "전망값", "단위", "주요가정",
-    ],
-    "06_감축목표": [
-        "지자체명", "목표수준", "목표범위", "부문",
-        "기준연도", "기준배출량", "목표연도", "배출전망",
-        "목표감축량", "목표배출량", "감축률(%)",
-    ],
-    "07_비전전략": [
-        "지자체명", "비전문구", "전략수준", "전략명",
-        "부문", "설명", "키워드",
-    ],
-    "08_감축사업목록": [
-        "지자체명", "관리번호", "부문", "핵심과제",
-        "사업명", "사업유형", "주관부서", "협조부서",
-        "사업개요", "성과지표명", "성과지표단위", "정량여부",
-    ],
-    "09_연차별이행계획": [
-        "지자체명", "관리번호", "사업명",
-        "기간시작", "기간종료", "연도", "연간계획",
-        "목표물량", "목표단위", "규제혁신계획", "입법계획",
-    ],
-    "10_정량감축량": [
-        "지자체명", "관리번호", "사업명", "연도",
-        "모니터링인자", "활동량", "활동단위",
-        "감축원단위ID", "감축원단위값", "예상감축량", "단위",
-    ],
-    "11_재정투자계획": [
-        "지자체명", "계획구분", "부문", "사업명",
-        "재원구분", "연도", "예산액", "예산단위",
-    ],
-    "12_대응기반강화": [
-        "지자체명", "대응기반영역", "과제ID", "과제명",
-        "정책방향", "주요내용", "대상", "주관부서", "기간",
-    ],
-    "13_이행관리환류": [
-        "지자체명", "거버넌스기구", "역할", "담당부서",
-        "절차단계", "기한", "산출물",
-    ],
-    "14_점검실적": [
-        "지자체명", "점검연도", "부문", "관리번호", "사업명",
-        "연간계획", "이행실적", "소요예산", "달성여부", "사업유형",
-    ],
-    "15_변경과제_조치": [
-        "지자체명", "점검연도", "부문", "관리번호", "사업명",
-        "변경전", "변경후", "변경사유",
-        "지연미달성사유", "조치계획",
-    ],
-    "16_시각자료목록": [
-        "지자체명", "시각자료ID", "캡션", "유형",
-        "데이터포함여부", "추출값요약", "디지타이징필요", "관련시트",
-    ],
-}
+from utils.extraction_schema import BUSINESS_SHEETS, SHEET_NAMES, make_excel_headers
+
+EXCEL_HEADERS = make_excel_headers()
 
 # 추출 대상 시트 키 목록 (파이프라인에서 LLM으로 추출하는 시트)
-EXTRACTION_SHEETS = [
-    "document_meta", "plan_overview", "regional_conditions",
-    "emissions_regional", "emissions_management",
-    "emissions_forecast", "reduction_targets",
-    "vision_strategy", "mitigation_projects",
-    "annual_implementation", "quantitative_reductions",
-    "financial_plan", "foundation_measures",
-    "governance_feedback", "monitoring_performance",
-    "changes_actions",
-]
+EXTRACTION_SHEETS = list(BUSINESS_SHEETS)
 
 # 시트 내부 키 → 엑셀 시트명 매핑
-SHEET_KEY_TO_NAME = {
-    "document_meta": "00_문서메타",
-    "plan_overview": "01_계획개요",
-    "regional_conditions": "02_지역여건",
-    "emissions_regional": "03_배출현황_지역",
-    "emissions_management": "04_배출현황_관리권한",
-    "emissions_forecast": "05_배출전망",
-    "reduction_targets": "06_감축목표",
-    "vision_strategy": "07_비전전략",
-    "mitigation_projects": "08_감축사업목록",
-    "annual_implementation": "09_연차별이행계획",
-    "quantitative_reductions": "10_정량감축량",
-    "financial_plan": "11_재정투자계획",
-    "foundation_measures": "12_대응기반강화",
-    "governance_feedback": "13_이행관리환류",
-    "monitoring_performance": "14_점검실적",
-    "changes_actions": "15_변경과제_조치",
-    "visual_inventory": "16_시각자료목록",
-}
+SHEET_KEY_TO_NAME = dict(SHEET_NAMES)
 
 # PDF 페이지 배치 처리 크기.
 # 너무 크면 출력 JSON이 길어져 파싱 실패가 늘 수 있어 안정성 위주로 둔다.
@@ -346,6 +246,7 @@ INTERNAL_OBJECT_KEYS = {
     "source_validation", "vision_execution", "semantic_routing_report", "object_evidence_audit",
     "source_coverage_snapshot",
     "fact_contract_review", "fact_contract_summary", "table_path_diagnostics",
+    "field_schema_version", "field_contract_review", "chart_observations", "vision_analyses", "vision_trace",
 }
 PROVENANCE_HEADERS = ["출처페이지", "근거ID", "객체ID", "추출원천", "검수상태", "추출엔진", "OCR보완여부", "출처계보"]
 if PROVENANCE_ENABLED:

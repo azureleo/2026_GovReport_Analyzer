@@ -25,7 +25,7 @@ class ImageFallbackTests(unittest.TestCase):
         rows = _fallback_visual_observations(page, "서울특별시")
 
         self.assertEqual(len(rows), 6)
-        self.assertEqual(rows[0]["대상시트"], "energy")
+        self.assertEqual(rows[0]["대상시트"], "regional_conditions")
         self.assertEqual(rows[2]["연도"], 2030)
         self.assertEqual(rows[2]["값"], -0.55)
         self.assertEqual(rows[2]["반영여부"], "검토")

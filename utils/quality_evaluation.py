@@ -6,33 +6,14 @@ from pathlib import Path
 import re
 
 import config
+from utils.extraction_schema import (REQUIRED_FIELDS, ALTERNATIVE_FIELDS, required_for_row,
+                                     alternatives_for_row)
 from utils.integration_audit import document_hash, save_json
 from utils.quality_adapters import (VERSION, adapt_warnings, canonical, compare_storage, deduplicate_issues,
     ids, issue, metric, norm, number, pages, present, read_saved_workbook, unit_norm)
 
-REQUIRED = {
-    "document_meta": ["지자체명", "계획명", "계획시작연도", "계획종료연도"],
-    "plan_overview": ["개요유형", "항목명", "항목값"],
-    "regional_conditions": ["지표명", "값"],
-    "emissions_regional": ["배출유형", "부문", "연도", "배출량", "단위"],
-    "emissions_management": ["관리부문", "직간접구분", "연도", "배출량", "단위"],
-    "emissions_forecast": ["시나리오", "연도", "전망값", "단위"],
-    "reduction_targets": ["목표수준", "기준연도", "목표연도"],
-    "vision_strategy": ["전략수준"], "mitigation_projects": ["사업명", "부문"],
-    "annual_implementation": ["사업명"],
-    "quantitative_reductions": ["사업명", "연도", "예상감축량", "단위"],
-    "financial_plan": ["사업명", "연도", "예산액", "예산단위"],
-    "foundation_measures": ["대응기반영역", "과제명"],
-    "governance_feedback": ["거버넌스기구", "역할"],
-    "monitoring_performance": ["점검연도", "사업명", "이행실적"],
-    "changes_actions": ["점검연도", "사업명"],
-}
-ALTERNATIVES = {
-    "vision_strategy": ["전략명", "비전문구"],
-    "annual_implementation": ["연간계획", "목표물량"],
-    "reduction_targets": ["목표감축량", "목표배출량", "감축률(%)"],
-    "changes_actions": ["변경사유", "지연미달성사유", "조치계획"],
-}
+REQUIRED = REQUIRED_FIELDS
+ALTERNATIVES = ALTERNATIVE_FIELDS
 MONEY_SCALES = {"원": 1, "천원": 1000, "만원": 10000, "백만원": 1000000, "억원": 100000000,
                 "조원": 1000000000000, "krw": 1, "천원단위": 1000, "백만 원": 1000000}
 NON_MONEY = {"tco2eq", "천톤co2eq", "톤co2eq", "만톤", "tco2", "개", "개소", "개소(가구)", "가구", "일", "%", "명", "대", "kwh", "mwh"}
@@ -114,7 +95,7 @@ def evaluate_saved_excel(path, *, expected=None, diagnostics=None, document=None
             def add(rule, field=None, *, certainty="suspected", severity="warning", message="", evidence=None):
                 findings.append(issue(rule, key, n, field, certainty=certainty, severity=severity,
                                       message=message, evidence=evidence))
-            requirements = list(REQUIRED[key])
+            requirements = required_for_row(key, row)
             if period_row(row):
                 requirements = [f for f in requirements if f != "연도"]
             for field in requirements:
@@ -123,7 +104,7 @@ def evaluate_saved_excel(path, *, expected=None, diagnostics=None, document=None
                     counts["filled"] += 1
                 else:
                     add("required.missing", field, certainty="confirmed", severity="error", message="행 유형별 필수 필드 공란")
-            alternatives = ALTERNATIVES.get(key)
+            alternatives = alternatives_for_row(key, row)
             if alternatives and not any(present(row.get(f)) for f in alternatives):
                 add("required.one_of", message="최소 한 필드 필요: " + ", ".join(alternatives), certainty="confirmed", severity="error")
             for field, value in row.items():
@@ -197,7 +178,10 @@ def evaluate_saved_excel(path, *, expected=None, diagnostics=None, document=None
                 counts["identity_eligible"] += 1
                 if all(present(row.get(f)) for f in fields):
                     counts["identity_checked"] += 1
-                    fact_groups[tuple(norm(row[f]) for f in fields)].append(row)
+                    identity = tuple(norm(row[f]) for f in fields)
+                    if key == "financial_plan":
+                        identity += (norm(row.get("행경로")),)
+                    fact_groups[identity].append(row)
         for group in fact_groups.values():
             variants = {fact_values(key, r) for r in group}
             if len(variants) > 1:

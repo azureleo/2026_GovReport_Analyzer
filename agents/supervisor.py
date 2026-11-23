@@ -257,6 +257,10 @@ class Supervisor:
                                         retry_failed_only=config.EXTRACTION_RETRY_FAILED_ONLY)
 
         # STEP 2~3: 추출·정제 (품질 미달 시 재시도)
+        vision_trace = None
+        if include_images:
+            from utils.vision_trace import VisionTrace
+            vision_trace = VisionTrace(output_path, input_sha256=context["input_sha256"], reporter=self._log)
         final_data = None
         for attempt in range(1, max_pipeline_retries + 1):
             self._log(f"\n[감독관] STEP 2~3: 추출·정제 시도 {attempt}/{max_pipeline_retries}")
@@ -279,13 +283,14 @@ class Supervisor:
             municipality = raw_data.get("municipality_name", "알 수 없음")
 
             if include_images:
-                image_agent = ImageAgent()
+                image_agent = ImageAgent(trace=vision_trace, attempt=attempt)
                 raw_data = image_agent.extract(
                     pages=pdf_content.pages,
                     text_results=raw_data,
                     municipality=municipality,
                 )
                 self._log(image_agent.report())
+                raw_data["vision_trace"] = vision_trace.checkpoint()
             else:
                 self._log("[에이전트2b 이미지분석] 비활성화 (--no-images)")
 
@@ -399,6 +404,20 @@ class Supervisor:
                              "failed_vision_batches": len(vision_failures),
                              "review_items": len(validation),
                              "ocr_summary": final_data.get("ocr_import_audit", {})}
+        if vision_trace is not None:
+            try:
+                trace_summary = vision_trace.finalize(result_path, final_data)
+            except Exception as error:
+                warning = f"Vision 저장 연결 검사 실패 (Excel 보존): {error}"
+                context["warnings"].append(warning)
+                self._log("[경고] " + warning)
+                trace_summary = vision_trace.checkpoint()
+            final_data["vision_trace"] = trace_summary
+            context["vision_trace"] = trace_summary
+            self.last_outcome["vision_trace"] = trace_summary
+            context["warnings"].extend(vision_trace.errors)
+            self._log(f"[Vision 응답·보류 기록] {trace_summary['index_path']}")
+            self._log(f"[Vision 저장 연결] {trace_summary['excel_check'].get('counts', {})} (원문 정확도와 구분)")
         if fact_contract_mode() != "off":
             try:
                 from utils.fact_contracts import persist_contract_report

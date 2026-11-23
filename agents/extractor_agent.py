@@ -14,6 +14,7 @@ import time
 import config
 from utils.pdf_reader import PageContent
 from utils import llm_client
+from utils.extraction_schema import field_prompt, normalize_row
 from utils.document_objects import (DocumentObject, build_document_objects, parse_html_table,
                                     render_table_object_chunks)
 from utils.evidence_merge import merge_extraction_rows, normalize_evidence_ids
@@ -53,18 +54,14 @@ _SHEET_CONFIGS = {
         "keywords": ["기본계획", "계획기간", "기준연도", "목표연도", "수립", "탄소중립", "녹색성장", "조례"],
         "prompt": """이 배치에서 문서 메타정보를 추출하세요.
 
-JSON 형식:
-{"document_meta": [{"지자체명": "...", "지자체유형": "광역|기초|기타", "계획명": "...", "발간일": "YYYY-MM-DD or null", "발간기관": "...", "계획시작연도": 숫자, "계획종료연도": 숫자, "기준연도": 숫자, "목표연도": "2030,2050 등 쉼표 구분", "법적근거": "...", "점검보고서여부": true/false}]}
-데이터가 없으면: {"document_meta": []}""",
+""" + field_prompt("document_meta"),
     },
 
     "plan_overview": {
         "keywords": ["목적", "필요성", "법적 근거", "추진체계", "추진절차", "경과", "공청회", "위원회", "자문"],
         "prompt": """이 배치에서 계획 수립 개요(목적, 법적근거, 추진경과 등)를 추출하세요.
 
-JSON 형식:
-{"plan_overview": [{"지자체명": "...", "개요유형": "목적|법적근거|추진체계|추진경과|의견수렴", "항목명": "...", "항목값": "내용 텍스트", "일자": "YYYY-MM-DD or null", "이해관계자": "...", "관련법령_계획": "..."}]}
-데이터가 없으면: {"plan_overview": []}""",
+""" + field_prompt("plan_overview"),
     },
 
     "regional_conditions": {
@@ -77,9 +74,7 @@ JSON 형식:
 - 연도별 시계열 데이터는 연도마다 별도 행으로 기록하세요.
 - 단위는 원문 그대로 기록하세요(명, 대, km, TJ, TOE, GWh 등).
 
-JSON 형식:
-{"regional_conditions": [{"지자체명": "...", "지표범주": "자연환경|인문사회|경제산업|에너지", "지표세부범주": "...", "지표명": "...", "연도": 숫자, "값": 숫자or null, "단위": "...", "출처": "..."}]}
-데이터가 없으면: {"regional_conditions": []}""",
+""" + field_prompt("regional_conditions"),
     },
 
     "emissions_regional": {
@@ -92,9 +87,7 @@ JSON 형식:
 - 부문: 에너지, 산업공정, 농업, LULUCF, 폐기물 등 원문 표기
 - 연도별 데이터는 연도마다 별도 행으로 기록
 
-JSON 형식:
-{"emissions_regional": [{"지자체명": "...", "인벤토리출처": "GIR|자체산정|기타", "배출범위": "직접배출|간접배출|흡수원", "배출유형": "직접배출|간접배출|흡수원", "부문": "...", "세부부문": "...", "연도": 숫자, "배출량": 숫자or null, "단위": "tCO2eq|천톤CO2eq|백만톤CO2eq", "흡수원여부": true/false}]}
-데이터가 없으면: {"emissions_regional": []}""",
+""" + field_prompt("emissions_regional"),
     },
 
     "emissions_management": {
@@ -107,9 +100,7 @@ JSON 형식:
 - 직간접구분: direct/indirect/sink
 - 합계포함여부: 해당 행이 합계에 포함되는지 (흡수원은 보통 제외)
 
-JSON 형식:
-{"emissions_management": [{"지자체명": "...", "인벤토리출처": "GIR|자체산정", "관리부문": "건물|수송|농축산|폐기물|흡수원|전환|산업|수소|합계", "세부부문": "가정|상업/공공|도로수송|...", "직간접구분": "direct|indirect|sink", "연도": 숫자, "배출량": 숫자or null, "단위": "tCO2eq|천톤CO2eq", "합계포함여부": true/false}]}
-데이터가 없으면: {"emissions_management": []}""",
+""" + field_prompt("emissions_management"),
     },
 
     "emissions_forecast": {
@@ -122,9 +113,7 @@ JSON 형식:
 - 전망방법원문: 보고서가 명시한 전망 방법론 텍스트
 - 연도별 데이터는 연도마다 별도 행
 
-JSON 형식:
-{"emissions_forecast": [{"지자체명": "...", "시나리오": "BAU|정책반영|추가조치", "전망범위": "지역전체|관리권한|null", "전망방법코드": "stat_time_series|stat_regression|stat_growth_rate|bottom_up_accounting_LEAP|기타", "전망방법원문": "...", "부문": "...", "세부부문": "...", "연도": 숫자, "전망값": 숫자or null, "단위": "tCO2eq|천톤CO2eq", "주요가정": "..."}]}
-데이터가 없으면: {"emissions_forecast": []}""",
+""" + field_prompt("emissions_forecast"),
     },
 
     "reduction_targets": {
@@ -137,18 +126,14 @@ JSON 형식:
 - 목표범위: 관리권한/관리권한+추가감축/지역전체
 - 감축률(%) = (기준배출량 - 목표배출량) / 기준배출량 × 100
 
-JSON 형식:
-{"reduction_targets": [{"지자체명": "...", "목표수준": "총괄|부문|세부부문", "목표범위": "관리권한|관리권한+추가감축|지역전체", "부문": "건물|수송|농축산|폐기물|흡수원|전환|산업|수소|합계|null", "기준연도": 숫자, "기준배출량": 숫자or null, "목표연도": 숫자, "배출전망": 숫자or null, "목표감축량": 숫자or null, "목표배출량": 숫자or null, "감축률": 숫자or null}]}
-데이터가 없으면: {"reduction_targets": []}""",
+""" + field_prompt("reduction_targets"),
     },
 
     "vision_strategy": {
         "keywords": ["비전", "전략", "추진방향", "핵심과제", "슬로건", "탄소중립 도시"],
         "prompt": """이 배치에서 비전·전략 정보를 추출하세요.
 
-JSON 형식:
-{"vision_strategy": [{"지자체명": "...", "비전문구": "2050 탄소중립 ... 등", "전략수준": "비전|추진전략|세부전략", "전략명": "...", "부문": "건물|수송|...|null", "설명": "...", "키워드": "..."}]}
-데이터가 없으면: {"vision_strategy": []}""",
+""" + field_prompt("vision_strategy"),
     },
 
     "mitigation_projects": {
@@ -157,13 +142,11 @@ JSON 형식:
         "prompt": """이 배치에서 감축대책·세부사업 목록을 추출하세요.
 
 주의:
-- 사업유형: 정량/정성
+- 사업유형은 원문 사업상태, 정량/정성은 정량여부 필드에 별도 기록
 - 한 사업의 개요, 부서, 지표를 한 행에 정리
 - 관리번호가 없으면 null
 
-JSON 형식:
-{"mitigation_projects": [{"지자체명": "...", "관리번호": "...", "부문": "건물|수송|농축산|폐기물|흡수원|전환|산업|수소", "핵심과제": "...", "사업명": "...", "사업유형": "신규|계속|확대|변경|기타", "주관부서": "...", "협조부서": "...", "사업개요": "...", "성과지표명": "...", "성과지표단위": "...", "정량여부": true/false}]}
-데이터가 없으면: {"mitigation_projects": []}""",
+""" + field_prompt("mitigation_projects"),
     },
 
     "annual_implementation": {
@@ -175,9 +158,7 @@ JSON 형식:
 - 초기 5년은 연 단위, 이후는 연 단위 또는 기간 단위
 - 기간 표기("2029~2030")는 기간시작/기간종료로 분리
 
-JSON 형식:
-{"annual_implementation": [{"지자체명": "...", "관리번호": "...", "사업명": "...", "기간시작": 숫자or null, "기간종료": 숫자or null, "연도": 숫자or null, "연간계획": "...", "목표물량": 숫자or null, "목표단위": "...", "규제혁신계획": "...", "입법계획": "..."}]}
-데이터가 없으면: {"annual_implementation": []}""",
+""" + field_prompt("annual_implementation"),
     },
 
     "quantitative_reductions": {
@@ -190,18 +171,14 @@ JSON 형식:
 - 예상감축량 = 활동량 × 감축원단위값
 - 모니터링인자: 사업량 측정에 사용되는 활동자료
 
-JSON 형식:
-{"quantitative_reductions": [{"지자체명": "...", "관리번호": "...", "사업명": "...", "연도": 숫자, "모니터링인자": "...", "활동량": 숫자or null, "활동단위": "...", "감축원단위ID": "...", "감축원단위값": 숫자or null, "예상감축량": 숫자or null, "단위": "tCO2eq"}]}
-데이터가 없으면: {"quantitative_reductions": []}""",
+""" + field_prompt("quantitative_reductions"),
     },
 
     "financial_plan": {
         "keywords": ["재정", "투자", "예산", "국비", "시비", "도비", "민간", "백만원", "억원"],
         "prompt": """이 배치에서 재정투자 계획(부문별·재원별·연도별 예산)을 추출하세요.
 
-JSON 형식:
-{"financial_plan": [{"지자체명": "...", "계획구분": "총계|온실가스감축대책|대응기반강화|기타", "부문": "...", "사업명": "...", "재원구분": "합계|국비|도비|시비|민간", "연도": 숫자, "예산액": 숫자or null, "예산단위": "백만원|억원"}]}
-데이터가 없으면: {"financial_plan": []}""",
+""" + field_prompt("financial_plan"),
     },
 
     "foundation_measures": {
@@ -212,9 +189,7 @@ JSON 형식:
 주의:
 - 대응기반영역: 적응대책/공유재산/국제협력/교육소통/녹색성장/청정에너지/정의로운전환/인력양성
 
-JSON 형식:
-{"foundation_measures": [{"지자체명": "...", "대응기반영역": "적응대책|공유재산|국제협력|교육소통|녹색성장|청정에너지|정의로운전환|인력양성", "과제ID": "...", "과제명": "...", "정책방향": "...", "주요내용": "...", "대상": "...", "주관부서": "...", "기간": "..."}]}
-데이터가 없으면: {"foundation_measures": []}""",
+""" + field_prompt("foundation_measures"),
     },
 
     "governance_feedback": {
@@ -222,9 +197,7 @@ JSON 형식:
                      "지원센터", "점검", "보고"],
         "prompt": """이 배치에서 이행관리·환류체계 정보를 추출하세요.
 
-JSON 형식:
-{"governance_feedback": [{"지자체명": "...", "거버넌스기구": "...", "역할": "...", "담당부서": "...", "절차단계": "...", "기한": "...", "산출물": "..."}]}
-데이터가 없으면: {"governance_feedback": []}""",
+""" + field_prompt("governance_feedback"),
     },
 
     "monitoring_performance": {
@@ -236,18 +209,14 @@ JSON 형식:
 - 달성여부: 달성/정상추진/지연/미달성 중 하나
 - 사업유형: 기존/변경/신규 중 하나
 
-JSON 형식:
-{"monitoring_performance": [{"지자체명": "...", "점검연도": 숫자, "부문": "...", "관리번호": "...", "사업명": "...", "연간계획": "...", "이행실적": "...", "소요예산": "...", "달성여부": "달성|정상추진|지연|미달성", "사업유형": "기존|변경|신규"}]}
-데이터가 없으면: {"monitoring_performance": []}""",
+""" + field_prompt("monitoring_performance"),
     },
 
     "changes_actions": {
         "keywords": ["변경", "신규사업", "미달성", "조치계획", "변경사유", "지연사유", "개선"],
         "prompt": """이 배치에서 변경과제·미달성 조치 정보를 추출하세요.
 
-JSON 형식:
-{"changes_actions": [{"지자체명": "...", "점검연도": 숫자or null, "부문": "...", "관리번호": "...", "사업명": "...", "변경전": "...", "변경후": "...", "변경사유": "...", "지연미달성사유": "...", "조치계획": "..."}]}
-데이터가 없으면: {"changes_actions": []}""",
+""" + field_prompt("changes_actions"),
     },
 }
 
@@ -529,7 +498,7 @@ class ExtractorAgent:
                 continue
             if not item.get("지자체명"):
                 item["지자체명"] = municipality
-        rows = [item for item in items if isinstance(item, dict)]
+        rows = [normalize_row(sheet_key, item) for item in items if isinstance(item, dict)]
         invalid_rows = [{"index": index, "value": item} for index, item in enumerate(items, 1)
                         if not isinstance(item, dict)]
         if strict and invalid_rows:

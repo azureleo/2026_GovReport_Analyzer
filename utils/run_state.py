@@ -38,7 +38,7 @@ _ENTITY_FIELDS: dict[str, tuple[str, ...]] = {
     "mitigation_projects": ("지자체명", "관리번호", "사업명", "부문"),
     "annual_implementation": ("지자체명", "관리번호", "사업명", "연도"),
     "quantitative_reductions": ("지자체명", "관리번호", "사업명", "연도"),
-    "financial_plan": ("지자체명", "관리번호", "사업명", "재원구분", "연도"),
+    "financial_plan": ("지자체명", "관리번호", "사업명", "재원구분", "연도", "행경로"),
     "foundation_measures": ("지자체명", "대응기반영역", "과제명"),
     "governance_feedback": ("지자체명", "거버넌스기구", "역할"),
     "monitoring_performance": ("지자체명", "점검연도", "관리번호", "사업명"),

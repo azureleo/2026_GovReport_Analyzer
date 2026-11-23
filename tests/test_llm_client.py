@@ -52,7 +52,7 @@ class LLMClientTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        return f"{sys.executable} {fake}"
+        return f'"{sys.executable}" "{fake}"'
 
     def test_call_text_uses_codex_cli_output_last_message(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -180,7 +180,7 @@ def test_off_and_audit_preserve_original_business_cells(tmp_path, monkeypatch):
     audited = OrganizerAgent().organize(deepcopy(source_data))
     p2 = ExcelAgent().write(audited, tmp_path / "audit.xlsx")
     assert read_rows(p1) == read_rows(p2)
-    assert "단위" not in read_rows(p2)[0]  # baseline target schema unchanged
+    assert read_rows(p2)[0]["단위"] == "천톤CO2eq"  # preservation no longer depends on enforcement
     assert audited["fact_contract_review"]
 
 

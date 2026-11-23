@@ -11,18 +11,10 @@ import hashlib
 import json
 import re
 
+from utils.extraction_schema import METRIC_UNITS, display_field, headers_for, normalize_row
+
 VERSION = "fact-contract-v1"
-METRICS = {
-    "reduction_targets": {"기준배출량": "단위", "배출전망": "단위", "목표감축량": "단위",
-                          "목표배출량": "단위", "감축률": "%"},
-    "emissions_regional": {"배출량": "단위"},
-    "emissions_management": {"배출량": "단위"},
-    "emissions_forecast": {"전망값": "단위"},
-    "quantitative_reductions": {"활동량": "활동단위", "감축원단위값": "감축원단위단위", "예상감축량": "단위"},
-    "annual_implementation": {"목표물량": "목표단위"},
-    "financial_plan": {"예산액": "예산단위"},
-    "regional_conditions": {"값": "단위"},
-}
+METRICS = METRIC_UNITS
 CONTEXT_FIELDS = ("계획구분", "계획문맥", "재원구분", "시나리오", "배출유형", "직간접구분",
                   "인벤토리출처", "지표종류", "감축량유형", "모니터링인자", "목표수준")
 SCOPES = ("목표범위", "전망범위", "배출범위")
@@ -61,6 +53,8 @@ def row_identity(sheet, row):
     """A normalized tuple shared by merge and checkpoints; never guesses context."""
     fields = ENTITY_FIELDS + SCOPES + CONTEXT_FIELDS + TIME_FIELDS
     key = {f: _token(row.get(f)) for f in fields}
+    if sheet == "financial_plan" and row.get("행경로") not in (None, "", []):
+        key["행경로"] = canonical(row["행경로"])
     from utils.source_coverage import number
     for field in TIME_FIELDS:
         if field != "시간기준" and (parsed := number(row.get(field))) is not None:
@@ -369,17 +363,8 @@ def apply_contracts(data, *, stage="final"):
 
 
 def excel_headers(sheet, headers):
-    """Persist contract axes only in enforce, leaving baseline/audit cells intact."""
-    if mode() != "enforce" or sheet not in METRICS:
-        return list(headers)
-    extra = ["지표종류", "계획문맥", "시간기준", "기간시작", "기간종료"]
-    if sheet == "reduction_targets":
-        extra += ["단위", "세부부문"]
-    if sheet == "financial_plan":
-        extra += ["관리번호"]
-    if sheet == "quantitative_reductions":
-        extra += ["감축량유형", "감축원단위단위"]
-    return list(dict.fromkeys([*headers, *extra]))
+    """Output preservation is independent of optional fact enforcement."""
+    return headers_for(sheet, headers)
 
 
 def persist_contract_report(output_path, data):
@@ -397,11 +382,13 @@ def persist_contract_report(output_path, data):
             records = list(book[name].values)
             headers = records[0]
             saved = [dict(zip(headers, r)) for r in records[1:]]
-            for row in data.get(sheet, []):
+            for source_row in data.get(sheet, []):
+                row = normalize_row(sheet, source_row)
                 contract = row.get("_fact_contract") or annotate_row(sheet, row)["_fact_contract"]
-                display = lambda f: "감축률(%)" if f == "감축률" else f
+                display = lambda f: display_field(sheet, f)
+                held_fields = {item["canonical"] for item in row.get("_field_alias_conflicts", [])}
                 compare = [f for f in (*ENTITY_FIELDS, *SCOPES, *CONTEXT_FIELDS, *TIME_FIELDS, *fields)
-                           if display(f) in headers and row.get(f) not in (None, "")]
+                           if display(f) in headers and row.get(f) not in (None, "") and f not in held_fields]
                 def agrees(actual):
                     return all(number(actual.get(display(f))) == number(row[f]) if f in fields else
                                _token(actual.get(f)) == _token(row[f]) for f in compare)
@@ -409,8 +396,10 @@ def persist_contract_report(output_path, data):
                 omitted = [f for f in (*ENTITY_FIELDS, *SCOPES, *CONTEXT_FIELDS, *TIME_FIELDS, *fields)
                            if display(f) not in headers and row.get(f) not in (None, "")]
                 checks.append({"sheet": sheet, "row_id": contract["row_id"], "excel_rows": matches,
-                               "status": "saved_with_unwritten_axes" if matches and omitted else "saved" if matches else "missing",
+                               "status": ("saved_with_held_fields" if matches and held_fields else
+                                          "saved_with_unwritten_axes" if matches and omitted else "saved" if matches else "missing"),
                                "checked_fields": compare, "unwritten_fields": omitted,
+                                "held_fields": sorted(held_fields),
                                "fact_ids": [f["fact_id"] for f in contract["facts"]]})
     finally:
         book.close()
@@ -422,6 +411,7 @@ def persist_contract_report(output_path, data):
     return {"path": str(path), "saved_rows": sum(c["status"] == "saved" for c in checks),
             "missing_rows": sum(c["status"] == "missing" for c in checks),
             "unwritten_axis_rows": sum(c["status"] == "saved_with_unwritten_axes" for c in checks),
+             "held_field_rows": sum(c["status"] == "saved_with_held_fields" for c in checks),
             "model_accuracy_evaluated": False}
 
 

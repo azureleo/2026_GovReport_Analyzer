@@ -12,10 +12,15 @@ import io
 import json
 import re
 import time
+from copy import deepcopy
 
 import config
 from utils.pdf_reader import PageContent
 from utils import llm_client
+from utils.extraction_schema import (METRIC_UNITS, VISION_BODY_SHEETS, VISION_TARGETS,
+                                     vision_contract)
+from utils.vision_rows import convert_chart_row, flatten_item, numeric, resolve_row_target
+from utils.vision_trace import image_reference
 from PIL import Image, ImageFilter, ImageStat
 
 logger = logging.getLogger(__name__)
@@ -42,7 +47,7 @@ DePlot 방식처럼 그래프 이미지를 먼저 선형화된 표 데이터로 
 규칙:
 1. 막대그래프, 꺾은선그래프, 영역그래프, 원그래프, 데이터 표만 변환하세요.
 2. 지도, 사진, 포스터, 목차, 설명용 삽화는 type을 "해당없음"으로 반환하세요.
-3. target_sheet는 이미지 내용에 따라 vehicle, energy, ghg, strategy, summary 중 하나로 분류하세요.
+3. target_sheet와 fields는 사용자 메시지의 공통 업무 필드 정의를 사용하세요.
 4. 단위가 "천 tCO2eq", "천톤CO2eq"이면 unit에 그대로 적고 값은 이미지에 보이는 숫자 그대로 반환하세요.
 5. 25,432.000처럼 천 단위/소수 표기가 있으면 25432000으로 붙이지 말고 25432 또는 25432.0으로 반환하세요.
 6. 수치가 불분명하면 null로 두고 confidence를 낮추세요.
@@ -50,10 +55,8 @@ DePlot 방식처럼 그래프 이미지를 먼저 선형화된 표 데이터로 
 8. 반드시 JSON만 반환하세요.
 
 시트별 fields 예시:
-- vehicle: {"용도": "승용", "차종": "전기", "대수": 123, "주행거리": 45.1}
-- energy: {"용도": "가정", "전력": 123, "가스": 456, "석유_에너지유": 12}
-- ghg: {"연도": 2030, "항목": "건물", "종류": "목표", "값": 12345}
-- strategy: {"감축전략_부문": "건물", "감축사업명": "공공건물 그린리모델링", "종류": "계획(감축량)", "연도": 2030, "값": 123}
+- reduction_targets: {"부문": "건물", "목표연도": 2030, "목표감축량": 123, "단위": "천톤CO2eq"}
+- financial_plan: {"사업명": "원문 사업명", "부문": "건물", "재원구분": "구비", "예산액": 123, "예산단위": "백만원"}
 """
 
 
@@ -394,10 +397,8 @@ def _normalize_chart_year(year) -> str | None:
 
 
 def _chart_year_int(year) -> int | None:
-    try:
-        return int(float(str(year).strip()))
-    except (ValueError, TypeError):
-        return None
+    value = numeric(year)
+    return int(value) if value is not None and value.is_integer() else None
 
 
 def _is_reference_chart(analysis: dict) -> bool:
@@ -415,7 +416,10 @@ def _is_table_like_chart(analysis: dict) -> bool:
 
 def _has_chart_value(item: dict) -> bool:
     fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
-    if item.get("값") is not None:
+    if numeric(item.get("값")) is not None:
+        return True
+    if any(numeric(item.get(k, fields.get(k))) is not None
+           for metrics in METRIC_UNITS.values() for k in metrics):
         return True
     return any(
         fields.get(k) is not None
@@ -460,10 +464,59 @@ def _declared_scenario(item: dict, analysis: dict) -> str:
 class ImageAgent:
     """에이전트 2-b: 이미지·그래프 분석 에이전트"""
 
-    def __init__(self):
+    def __init__(self, *, trace=None, attempt=1):
         self._image_results: list[dict] = []
         self._triage_stats: dict = {}
         self._batch_input_reviews: list[dict] = []
+        self.trace = trace
+        self.attempt = attempt
+
+    def _vision_response(self, batch, prompt, system, mode):
+        """Persist the request and literal client result before any JSON parsing."""
+        call_id = self.trace.begin(prompt=prompt, system=system, attempt=self.attempt, mode=mode,
+            images=[image_reference(page, image, idx) for idx, (page, image) in enumerate(batch, 1)]) if self.trace else None
+        try:
+            images = [image["base64"] for _, image in batch]
+            response = (llm_client.call_vision(images[0], prompt, system=system) if len(images) == 1 else
+                        llm_client.call_vision_batch(images, prompt, system=system))
+        except BaseException as error:
+            if self.trace:
+                self.trace.finish(call_id, "interrupted" if isinstance(error, (KeyboardInterrupt, SystemExit)) else
+                                  "transport_error", error=error)
+            raise
+        if self.trace:
+            self.trace.response(call_id, response)
+        return response, call_id
+
+    def _finish_vision(self, call_id, status, results=(), diagnostics=()):
+        self._batch_input_reviews.extend(diagnostics)
+        if self.trace:
+            self.trace.finish(call_id, status, analyses=results, diagnostics=diagnostics)
+        for result in results:
+            if call_id:
+                result["_vision_call_id"] = call_id
+                self._attach_image_reference(call_id, result)
+        return results
+
+    def _attach_image_reference(self, call_id, result):
+        images = self.trace.calls[call_id]["request"]["images"]
+        reference = next((r for r in images if r["image_index"] == result.get("image_index", 1)), {})
+        result["_vision_input_reference"] = deepcopy(reference)
+        for key in ("object_id", "evidence_id"):
+            if reference.get(key) and not result.get(key):
+                result[key] = reference[key]
+
+    @staticmethod
+    def _invalid_response_status(response):
+        if not isinstance(response, str) or not response.strip():
+            return "empty_response"
+        # parse_json also accepts fenced JSON; {} may be the client's failure sentinel.
+        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", response.strip(), flags=re.I)
+        try:
+            json.loads(cleaned)
+        except (TypeError, ValueError):
+            return "invalid_json"
+        return "invalid_shape"
 
     def _analyze_image(self, image: dict, page_num: int, municipality: str) -> dict | None:
         if config.IMAGE_CHART_TABLE_EXTRACTION:
@@ -492,30 +545,36 @@ class ImageAgent:
   "other_data": {{}}
 }}"""
 
-        resp = llm_client.call_vision(image["base64"], prompt, system=IMAGE_SYSTEM)
-        parsed = llm_client.parse_json(resp)
+        resp, call_id = self._vision_response([(page_num, image)], prompt, IMAGE_SYSTEM, "legacy_single")
+        parsed = llm_client.parse_json(resp or "")
         # list나 빈 값이 반환되면 건너뜀
         if not parsed or not isinstance(parsed, dict):
+            self._finish_vision(call_id, self._invalid_response_status(resp), diagnostics=[
+                {"code": "invalid_single_response", "page_number": page_num,
+                 "message": "빈/비정상 응답; {}는 CLI 실패 대체값일 수 있어 실행 로그 확인 필요"}])
             return None
         if parsed.get("type") == "해당없음":
+            self._finish_vision(call_id, "no_data")
             return None
         parsed["page_number"] = page_num
         parsed["municipality"] = municipality
+        self._finish_vision(call_id, "complete", [parsed])
         return parsed
 
-    def _chart_to_table(self, image: dict, page_num: int, municipality: str) -> dict | None:
+    def _chart_to_table(self, image: dict, page_num: int, municipality: str, *, page_context="") -> dict | None:
         prompt = f"""이 이미지는 '{municipality}' 탄소중립 기본계획 보고서 {page_num}페이지에서 추출되었습니다.
 
 이미지가 그래프/차트/표라면 DePlot 방식으로 다음 JSON 형식의 표 데이터로 변환하세요:
 {{
   "type": "chart_table|해당없음",
-  "target_sheet": "regional_conditions|emissions_regional|emissions_management|emissions_forecast|reduction_targets|mitigation_projects|financial_plan|vision_strategy",
+  "target_sheet": "{'|'.join(VISION_TARGETS)}",
   "chart_type": "막대|꺾은선|영역|원|표|복합|기타",
   "title": "그래프/표 제목",
   "unit": "단위 원문",
   "page_number": {page_num},
   "table": [
     {{
+      "target_sheet": null,
       "연도": 2030,
       "항목": "계열명 또는 부문명",
       "종류": "현황|전망|목표|기타",
@@ -535,18 +594,28 @@ class ImageAgent:
 차량 등록대수/주행거리 및 에너지 소비량 표는 regional_conditions로 두세요.
 이미지에 숫자축만 있고 정확한 값을 읽기 어려우면 대략값을 만들지 말고 null로 반환하세요."""
 
-        resp = llm_client.call_vision(image["base64"], prompt, system=CHART_TABLE_SYSTEM)
-        parsed = llm_client.parse_json(resp)
+        prompt += "\n\n" + vision_contract()
+        if page_context:
+            prompt += "\n[같은 페이지의 보조 문맥; 이미지 수치와 다르면 추정하지 말고 검토 요청]\n" + page_context
+        resp, call_id = self._vision_response([(page_num, image)], prompt, CHART_TABLE_SYSTEM, "chart_single")
+        parsed = llm_client.parse_json(resp or "")
         if not parsed or not isinstance(parsed, dict):
+            self._finish_vision(call_id, self._invalid_response_status(resp), diagnostics=[
+                {"code": "invalid_single_response", "page_number": page_num,
+                 "message": "빈/비정상 응답; {}는 CLI 실패 대체값일 수 있어 실행 로그 확인 필요"}])
             return None
         if parsed.get("type") == "해당없음":
+            self._finish_vision(call_id, "no_data")
             return None
         table = parsed.get("table", [])
         if not isinstance(table, list) or not table:
+            self._finish_vision(call_id, "invalid_shape", diagnostics=[
+                {"code": "invalid_chart_table", "page_number": page_num, "message": "비어 있거나 잘못된 table"}])
             return None
         parsed["type"] = "chart_table"
         parsed["page_number"] = page_num
         parsed["municipality"] = municipality
+        self._finish_vision(call_id, "complete", [parsed])
         return parsed
 
     def _chart_to_table_batch(
@@ -558,7 +627,7 @@ class ImageAgent:
             return []
         if len(batch) == 1:
             page, image = batch[0]
-            result = self._chart_to_table(image, page.page_number, municipality)
+            result = self._chart_to_table(image, page.page_number, municipality, page_context=_compact_page_context(page))
             return [result] if result else []
 
         image_lines = []
@@ -582,12 +651,13 @@ class ImageAgent:
       "image_index": 1,
       "page_number": 123,
       "type": "chart_table|해당없음",
-      "target_sheet": "regional_conditions|emissions_regional|emissions_management|emissions_forecast|reduction_targets|mitigation_projects|financial_plan|vision_strategy",
+      "target_sheet": "{'|'.join(VISION_TARGETS)}",
       "chart_type": "막대|꺾은선|영역|원|표|복합|기타",
       "title": "그래프/표 제목",
       "unit": "단위 원문",
       "table": [
         {{
+          "target_sheet": null,
           "연도": 2030,
           "항목": "계열명 또는 부문명",
           "종류": "현황|전망|목표|기타",
@@ -610,15 +680,18 @@ class ImageAgent:
 - 표/그래프가 아니거나 지자체 직접 데이터가 아니면 type은 "해당없음"으로 두세요.
 - 반드시 JSON만 반환하세요."""
 
-        images = [image["base64"] for _, image in batch]
-        response = llm_client.call_vision_batch(images, prompt, system=CHART_TABLE_SYSTEM)
-        parsed = llm_client.parse_json(response)
-        raw_analyses = parsed.get("analyses", []) if isinstance(parsed, dict) else parsed
+        prompt += "\n\n" + vision_contract()
+        response, call_id = self._vision_response([(page.page_number, image) for page, image in batch],
+                                                 prompt, CHART_TABLE_SYSTEM, "chart_batch")
+        parsed = llm_client.parse_json(response or "")
+        raw_analyses = parsed.get("analyses") if isinstance(parsed, dict) else parsed
         if not isinstance(raw_analyses, list):
-            self._batch_input_reviews.append({"code": "invalid_batch_response", "message": "analyses must be a list"})
+            self._finish_vision(call_id, self._invalid_response_status(response), diagnostics=[
+                {"code": "invalid_batch_response", "message": "analyses must be a list"}])
             return []
 
         results: list[dict] = []
+        review_start = len(self._batch_input_reviews)
         page_by_index = {idx: page.page_number for idx, (page, _) in enumerate(batch, start=1)}
         indexed = {}
         for raw in raw_analyses:
@@ -647,16 +720,28 @@ class ImageAgent:
                 self._batch_input_reviews.append({"code": "invalid_chart_table", "image_index": image_index})
                 continue
             if not table:
+                self._batch_input_reviews.append({"code": "empty_chart_table", "image_index": image_index})
                 continue
             page_number = page_by_index[image_index]
             raw["type"] = "chart_table"
             raw["page_number"] = page_number
             raw["municipality"] = municipality
             results.append(raw)
+        diagnostics = self._batch_input_reviews[review_start:]
+        # Diagnostics are already in the batch journal; do not append them twice.
+        if self.trace:
+            self.trace.finish(call_id, "partial" if diagnostics else "complete" if results else "no_data",
+                              analyses=results, diagnostics=diagnostics)
+        for result in results:
+            if call_id:
+                result["_vision_call_id"] = call_id
+                self._attach_image_reference(call_id, result)
         return results
 
     def _infer_target_sheet(self, analysis: dict) -> str:
         target = analysis.get("target_sheet")
+        if target is not None and not isinstance(target, str):
+            return ""  # invalid identifiers must not become a fallback body sheet
         # 새 시트 키 매핑
         _LEGACY_MAP = {
             "vehicle": "regional_conditions",
@@ -665,15 +750,13 @@ class ImageAgent:
             "strategy": "mitigation_projects",
             "summary": "vision_strategy",
         }
-        _VALID_KEYS = {
-            "regional_conditions", "emissions_regional", "emissions_management",
-            "emissions_forecast", "reduction_targets", "mitigation_projects",
-            "financial_plan", "vision_strategy",
-        }
+        _VALID_KEYS = set(VISION_TARGETS)
         if target in _VALID_KEYS:
             return target
         if target in _LEGACY_MAP:
             return _LEGACY_MAP[target]
+        if target:
+            return target  # explicitly unsupported targets remain reviewable
         text = " ".join(str(analysis.get(k, "")) for k in ["title", "summary", "unit"])
         if any(k in text for k in ["자동차", "차량", "등록대수", "주행거리"]):
             return "regional_conditions"
@@ -716,9 +799,18 @@ class ImageAgent:
             reasons.append("값 없음")
 
         year_int = _chart_year_int(item.get("연도"))
-        if year_int is None:
+        year_int = year_int or _chart_year_int(item.get("목표연도")) or _chart_year_int(item.get("기준연도"))
+        start, end = _chart_year_int(item.get("기간시작")), _chart_year_int(item.get("기간종료"))
+        period = start is not None and end is not None and 1 <= start <= end <= 9999
+        if (start is not None or end is not None) and not period:
+            reasons.append("기간 범위 불명확")
+        if item.get("시간기준") in ("기간합계", "평년값") and year_int is not None:
+            reasons.append("기간값/단일 연도 혼용")
+        if year_int is None and not period:
             reasons.append("연도 없음/비숫자")
-        if year_int is not None and year_int not in config.IMAGE_CHART_MERGE_YEARS:
+        explicit_baseline = (target_sheet == "reduction_targets" and item.get("기준배출량") is not None
+                             and year_int == _chart_year_int(item.get("기준연도")))
+        if year_int is not None and year_int not in config.IMAGE_CHART_MERGE_YEARS and not explicit_baseline:
             reasons.append("연도 범위 외")
 
         chart_type = str(analysis.get("chart_type", "") or "")
@@ -768,210 +860,104 @@ class ImageAgent:
         text_results.setdefault("chart_observations", []).append(evidence)
 
     def _merge_image_results(self, text_results: dict, analyses: list[dict], municipality: str) -> dict:
-        existing_ghg = text_results.setdefault("emissions_regional", [])
-        existing_management = text_results.setdefault("emissions_management", [])
-        existing_regional = text_results.setdefault("regional_conditions", [])
-        existing_projects = text_results.setdefault("mitigation_projects", [])
-        existing_forecast = text_results.setdefault("emissions_forecast", [])
-        existing_targets = text_results.setdefault("reduction_targets", [])
-        existing_financial = text_results.setdefault("financial_plan", [])
-
+        from utils.evidence_merge import merge_extraction_rows, _lineage
+        for key in config.EXTRACTION_SHEETS:
+            text_results.setdefault(key, [])
+        raw_analyses = text_results.setdefault("vision_analyses", [])
+        def fingerprint_of(value):
+            content = {k: v for k, v in value.items() if not k.startswith("_vision_")}
+            return hashlib.sha256(json.dumps(content, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
+        known = {fingerprint_of(a)
+                 for a in raw_analyses}
         for analysis in analyses:
-            before_counts = {key: len(text_results.get(key, [])) for key in config.EXTRACTION_SHEETS}
-            chart_rows = analysis.get("table", []) if analysis.get("type") == "chart_table" else []
+            fingerprint = fingerprint_of(analysis)
+            if fingerprint not in known:
+                raw_analyses.append(deepcopy(analysis))
+                known.add(fingerprint)
             chart_target = self._infer_target_sheet(analysis)
-            if isinstance(chart_rows, list):
-                for item in chart_rows:
-                    if not isinstance(item, dict):
-                        continue
-                    fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
-                    merged_item = {**fields, **item}
-                    target_sheet = chart_target
-                    if chart_target in {"emissions_regional", "emissions_management", "emissions_forecast", "reduction_targets"}:
-                        explicit_kind = merged_item.get("종류")
-                        if explicit_kind in {"현황", "전망", "목표"}:
-                            target_sheet = {"현황": "emissions_management" if chart_target == "emissions_management" else "emissions_regional",
-                                            "전망": "emissions_forecast", "목표": "reduction_targets"}[explicit_kind]
-                    can_merge, final_confidence, merge_reasons = self._chart_merge_decision(analysis, merged_item, target_sheet)
-                    self._append_chart_observation(
-                        text_results, analysis, merged_item, target_sheet,
-                        can_merge, final_confidence, merge_reasons
-                    )
-
-                    if not can_merge:
-                        continue
-                    if target_sheet == "vision_strategy":
-                        continue
-
-                    if target_sheet == "regional_conditions":
-                        # 자동차/에너지 등 지역여건 데이터
-                        year_int = _chart_year_int(merged_item.get("연도"))
-                        val = _parse_chart_value(merged_item.get("값") if merged_item.get("값") is not None else merged_item.get("대수"))
-                        existing_regional.append({
-                            "지자체명": municipality,
-                            "지표범주": "에너지" if any(k in str(merged_item) for k in ["에너지", "전력", "가스"]) else "인문사회",
-                            "지표세부범주": "",
-                            "지표명": merged_item.get("항목") or analysis.get("title") or "",
-                            "연도": year_int,
-                            "값": val,
-                            "단위": merged_item.get("단위") or analysis.get("unit") or "",
-                            "출처": f"이미지 p.{analysis.get('page_number')}",
-                        })
-                        continue
-
-                    if target_sheet == "mitigation_projects":
-                        existing_projects.append({
-                            "지자체명": municipality,
-                            "관리번호": merged_item.get("관리번호") or "",
-                            "부문": merged_item.get("감축전략_부문") or merged_item.get("항목") or "",
-                            "핵심과제": "",
-                            "사업명": merged_item.get("감축사업명") or analysis.get("title") or "",
-                            "사업유형": "기타",
-                            "주관부서": "",
-                            "협조부서": "",
-                            "사업개요": "",
-                            "성과지표명": merged_item.get("성과지표") or "",
-                            "성과지표단위": "",
-                            "정량여부": True,
-                        })
-                        continue
-
-                    if target_sheet == "financial_plan":
-                        year_int = _chart_year_int(merged_item.get("연도"))
-                        val = _parse_chart_value(merged_item.get("값"))
-                        existing_financial.append({
-                            "지자체명": municipality,
-                            "계획구분": "온실가스감축대책",
-                            "부문": merged_item.get("항목") or "",
-                            "사업명": analysis.get("title") or "",
-                            "재원구분": "합계",
-                            "연도": year_int,
-                            "예산액": val,
-                            "예산단위": merged_item.get("단위") or analysis.get("unit") or "",
-                        })
-                        continue
-
-                    # 기본: emissions_regional (온실가스 배출 데이터)
-                    year = merged_item.get("연도")
-                    value = merged_item.get("값")
-                    if year is None or value is None:
-                        continue
-                    year_int = _chart_year_int(year)
-                    if year_int is None:
-                        continue
-                    kind = _infer_chart_kind(merged_item, analysis)
-                    explicit_kind = merged_item.get("종류") in {"현황", "전망", "목표"}
-                    row_target = ({"현황": "emissions_management" if target_sheet == "emissions_management" else "emissions_regional",
-                                   "전망": "emissions_forecast", "목표": "reduction_targets"}[kind]
-                                  if explicit_kind else target_sheet)
-                    label = merged_item.get("항목") or analysis.get("title") or "기타"
-                    unit = merged_item.get("단위") or analysis.get("unit")
-                    numeric = _parse_chart_value(value, unit)
-                    if numeric is None:
-                        continue
-
-                    if row_target == "emissions_forecast" or (not explicit_kind and kind == "전망"):
-                        scenario = _declared_scenario(merged_item, analysis)
-                        existing_forecast.append({"지자체명": municipality,
-                            "전망범위": merged_item.get("전망범위", ""), "시나리오": scenario,
-                            "부문": label, "세부부문": merged_item.get("세부부문", ""),
-                            "연도": year_int, "전망값": numeric, "단위": unit or ""})
-                        continue
-                    if row_target == "reduction_targets" or (not explicit_kind and kind == "목표"):
-                        existing_targets.append({"지자체명": municipality, "목표수준": merged_item.get("목표수준", ""),
-                            "목표범위": merged_item.get("목표범위", ""), "부문": label,
-                            "목표연도": year_int, "목표배출량": numeric, "단위": unit or ""})
-                        continue
-
-                    if row_target == "emissions_management":
-                        existing_management.append({"지자체명": municipality,
-                            "인벤토리출처": "이미지", "관리부문": merged_item.get("관리부문") or label,
-                            "직간접구분": merged_item.get("직간접구분", ""),
-                            "세부부문": merged_item.get("세부부문", ""), "연도": year_int,
-                            "배출량": numeric, "단위": unit or ""})
-                        continue
-
-                    existing_ghg.append({
-                        "지자체명": municipality,
-                        "인벤토리출처": "이미지",
-                        "배출범위": merged_item.get("배출범위", ""),
-                        "배출유형": merged_item.get("배출유형", ""),
-                        "부문": label,
-                        "세부부문": merged_item.get("세부부문", ""),
-                        "연도": year_int,
-                        "배출량": numeric,
-                        "단위": unit or "",
-                        "흡수원여부": False,
-                    })
-
+            before_counts = {key: len(text_results.get(key, [])) for key in config.EXTRACTION_SHEETS}
+            items = list(analysis.get("table", [])) if analysis.get("type") == "chart_table" else []
+            # Legacy series use the same semantic converter and conservative gate.
             for series in analysis.get("ghg_data", []):
-                if not isinstance(series, dict):
+                if not isinstance(series, dict) or not isinstance(series.get("values"), dict):
                     continue
-                label = series.get("label", "")
-                data_type = series.get("data_type", "")
-                values = series.get("values", {})
-                if not isinstance(values, dict) or not values:
+                for year, value in series["values"].items():
+                    fields = {k: deepcopy(v) for k, v in series.items() if k not in {"values", "label", "data_type"}}
+                    items.append({"연도": year, "값": value, "항목": series.get("label"),
+                                  "종류": series.get("data_type"), "fields": fields})
+            for item_index, item in enumerate(items, 1):
+                raw_item = deepcopy(item)
+                malformed_item = not isinstance(item, dict)
+                if not isinstance(item, dict):
+                    item = {}
+                flat, input_reasons = flatten_item(item)
+                if malformed_item:
+                    input_reasons.append("표 행 자료형 오류: 객체가 아님")
+                target = flat.get("target_sheet") or chart_target
+                target = self._infer_target_sheet({"target_sheet": target}) if target else target
+                explicit_metrics = any(numeric(flat.get(field)) is not None
+                                       for field in METRIC_UNITS.get(chart_target, {}))
+                if not flat.get("target_sheet") and not explicit_metrics and chart_target in {
+                        "emissions_regional", "emissions_management", "emissions_forecast", "reduction_targets"}:
+                    kind = flat.get("종류")
+                    if isinstance(kind, str) and kind in {"현황", "전망", "목표"}:
+                        target = {"현황": "emissions_management" if chart_target == "emissions_management" else "emissions_regional",
+                                  "전망": "emissions_forecast", "목표": "reduction_targets"}[kind]
+                original_target = target
+                target, converted_item, route_reason = resolve_row_target(target, item, analysis)
+                row, conversion_reasons = convert_chart_row(target, converted_item, analysis, municipality)
+                if target == "emissions_forecast" and not row.get("시나리오"):
+                    row["시나리오"] = _declared_scenario(flat, analysis)
+                # Gate on canonical year/period/value fields as well as raw flags.
+                gate_item = {**flat, **row, "fields": item.get("fields", {})}
+                can_merge, final_confidence, reasons = self._chart_merge_decision(analysis, gate_item, target)
+                reasons = sorted(set([*reasons, *input_reasons, *conversion_reasons]))
+                declared_reviews = flat.get("review_reasons") or analysis.get("review_reasons")
+                if declared_reviews:
+                    # Preserve explicit model uncertainty, without elevating an
+                    # otherwise eligible row merely because it has a number.
+                    declared_reviews = declared_reviews if isinstance(declared_reviews, list) else [declared_reviews]
+                    reasons += ["모델 검토 요청:" + str(reason) for reason in declared_reviews]
+                reasons = sorted(set(reasons))
+                can_merge = can_merge and not reasons
+                observed = {**flat, "fields": item.get("fields", {})}
+                self._append_chart_observation(text_results, analysis, observed, target,
+                                               can_merge, final_confidence, reasons)
+                observation = text_results["chart_observations"][-1]
+                observation.update({"원시행": raw_item, "변환후행": deepcopy(row), "보류사유": reasons,
+                                    "객체ID": analysis.get("object_id"), "근거ID": analysis.get("evidence_id"),
+                                    "observation_id": f"{fingerprint}:{item_index}",
+                                    "vision_call_id": analysis.get("_vision_call_id"),
+                                    "원래대상시트": original_target, "분류보완사유": route_reason,
+                                    "판정단계": "정제 전 병합 허용 여부; 최종 Excel 저장과 구분"})
+                decision_id = hashlib.sha256((str(analysis.get("_vision_call_id") or "parsed-replay") + ":" +
+                                             observation["observation_id"]).encode()).hexdigest()
+                observation["vision_decision_id"] = decision_id
+                if self.trace:
+                    self.trace.decision(decision_id, observation, row)
+                previous = next((o for o in text_results["chart_observations"][:-1]
+                                 if o.get("observation_id") == observation["observation_id"]), None)
+                if previous is not None:
+                    previous.update(observation)
+                    text_results["chart_observations"].pop()
+                if not can_merge:
                     continue
-
-                for year, val in values.items():
-                    year_int = _chart_year_int(year)
-                    if year_int is None:
-                        continue
-                    unit = series.get("단위") or series.get("unit") or analysis.get("unit") or ""
-                    numeric = _parse_chart_value(val, unit)
-                    if numeric is None:
-                        continue
-                    if data_type == "전망":
-                        existing_forecast.append({"지자체명": municipality,
-                            "전망범위": series.get("전망범위", ""), "시나리오": _declared_scenario(series, analysis),
-                            "부문": label, "세부부문": series.get("세부부문", ""),
-                            "연도": year_int, "전망값": numeric, "단위": unit})
-                        continue
-                    if data_type == "목표":
-                        existing_targets.append({"지자체명": municipality, "목표수준": series.get("목표수준", ""),
-                            "목표범위": series.get("목표범위", ""), "부문": label,
-                            "목표연도": year_int, "목표배출량": numeric, "단위": unit})
-                        continue
-                    if chart_target == "emissions_management":
-                        existing_management.append({"지자체명": municipality,
-                            "인벤토리출처": "이미지", "관리부문": series.get("관리부문") or label,
-                            "직간접구분": series.get("직간접구분", ""),
-                            "세부부문": series.get("세부부문", ""), "연도": year_int,
-                            "배출량": numeric, "단위": unit})
-                        continue
-                    existing_ghg.append({
-                        "지자체명": municipality,
-                        "인벤토리출처": "이미지",
-                        "배출범위": series.get("배출범위", ""),
-                        "배출유형": series.get("배출유형", ""),
-                        "부문": label,
-                        "세부부문": series.get("세부부문", ""),
-                        "연도": year_int,
-                        "배출량": numeric,
-                        "단위": unit,
-                        "흡수원여부": False,
-                    })
-
-            from utils.evidence_merge import merge_extraction_rows
+                row.setdefault("출처페이지", analysis.get("page_number"))
+                row.setdefault("근거ID", analysis.get("evidence_id") or
+                               f"vision-p{analysis.get('page_number')}-i{analysis.get('image_index', 1)}")
+                row.setdefault("객체ID", analysis.get("object_id") or row["근거ID"])
+                row.setdefault("추출원천", "visual")
+                lineage = {"vision_decision_id": decision_id, "vision_call_id": analysis.get("_vision_call_id"),
+                           "객체ID": row["객체ID"], "근거ID": row["근거ID"], "출처페이지": row["출처페이지"]}
+                prior_lineage = _lineage(row) if row.get("출처계보") else []
+                row["_extraction_sources"] = [*prior_lineage, lineage]
+                row["출처계보"] = json.dumps(row["_extraction_sources"], ensure_ascii=False, sort_keys=True)
+                text_results.setdefault(target, []).append(row)
             for key, count in before_counts.items():
                 rows = text_results.get(key, [])
-                incoming = rows[count:]
-                for row in incoming:
-                    row.setdefault("출처페이지", analysis.get("page_number"))
-                    row.setdefault("근거ID", analysis.get("evidence_id") or f"vision-p{analysis.get('page_number')}-i{analysis.get('image_index', 1)}")
-                    row.setdefault("객체ID", analysis.get("object_id") or row["근거ID"])
-                    row.setdefault("추출원천", "visual")
-                if incoming:
-                    rows[:] = merge_extraction_rows(key, rows[:count], incoming,
+                if len(rows) > count:
+                    rows[:] = merge_extraction_rows(key, rows[:count], rows[count:],
                                                     text_results.setdefault("merge_conflicts", []))
-
-        text_results["emissions_regional"] = existing_ghg
-        text_results["emissions_management"] = existing_management
-        text_results["regional_conditions"] = existing_regional
-        text_results["mitigation_projects"] = existing_projects
-        text_results["emissions_forecast"] = existing_forecast
-        text_results["reduction_targets"] = existing_targets
-        text_results["financial_plan"] = existing_financial
         return text_results
 
     def extract(self, pages: list[PageContent], text_results: dict, municipality: str) -> dict:
@@ -1095,6 +1081,11 @@ class ImageAgent:
                 print(f"[Vision 경고] 배치 실패, 이전 성공 결과 유지: {error}")
                 continue
             analyses.extend(batch_results)
+            # Save hold reasons and eligible rows after each successful boundary,
+            # so a later interruption does not erase earlier decisions.
+            self._merge_image_results(text_results, batch_results, municipality)
+            if self.trace:
+                self.trace.checkpoint()
             if self._batch_input_reviews:
                 self._triage_stats["partial_batches"] += 1
                 self._triage_stats["failed_batches"].append({"batch": batch_num, "pages": page_nums,
@@ -1105,12 +1096,13 @@ class ImageAgent:
                 titles = ", ".join(str(r.get("title", "제목없음"))[:30] for r in batch_results[:3])
                 print(f"  → 유효 {len(batch_results)}건: {titles}")
             else:
-                print("  → 관련 있는 표/그래프 없음")
+                print("  → 유효 분석 없음/응답 미완료: 원응답·입력 진단 확인" if self._batch_input_reviews else
+                      "  → 관련 있는 표/그래프 없음 (해당없음 응답)")
 
         self._image_results = analyses
         print(f"[에이전트2b 이미지분석] 유효 분석 {len(analyses)}개 완료")
 
-        merged_results = self._merge_image_results(text_results, analyses, municipality)
+        merged_results = text_results
         observed_pages = {
             row.get("페이지")
             for row in merged_results.get("chart_observations", [])

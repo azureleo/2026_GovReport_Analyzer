@@ -373,7 +373,8 @@ def test_vision_explicit_target_row_precedes_chart_forecast_target(monkeypatch):
     agent = ImageAgent()
     monkeypatch.setattr(agent, "_chart_merge_decision", lambda *args: (True, "high", []))
     analysis = {"type": "chart_table", "target_sheet": "emissions_forecast", "title": "BAU 전망 및 목표",
-                "page_number": 10, "table": [{"항목": "건물", "연도": 2030, "값": 80, "종류": "목표"}]}
+                "page_number": 10, "table": [{"항목": "건물", "연도": 2030, "값": 80, "종류": "목표",
+                                             "fields": {"목표배출량": 80}}]}
     result = agent._merge_image_results({}, [analysis], "테스트시")
     assert not result["emissions_forecast"]
     assert result["reduction_targets"][0]["목표배출량"] == 80
@@ -406,8 +407,8 @@ def test_vision_management_sheet_preserves_declared_axis(monkeypatch):
                                                    ("목표", "reduction_targets", "목표배출량")])
 def test_vision_legacy_series_preserves_declared_semantic_type(kind, sheet, value_field):
     from agents.image_agent import ImageAgent
-    analysis = {"type": "그래프", "page_number": 10,
-                "ghg_data": [{"label": "건물", "data_type": kind, "전망범위": "관리권한",
+    analysis = {"type": "그래프", "page_number": 10, "confidence": "high",
+                "ghg_data": [{"label": "건물", "data_type": kind, "지표종류": value_field, "전망범위": "관리권한",
                               "시나리오": "정책반영", "values": {"2030": 80}}]}
     result = ImageAgent()._merge_image_results({}, [analysis], "테스트시")
     assert not result["emissions_regional"]
